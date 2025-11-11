@@ -1,0 +1,2682 @@
+---
+title: "CHS Main Data Analyses"
+author: "Qiaofeng Ye"
+format: html
+editor: visual
+toc: true
+toc_float: true
+editor_options:
+  chunk_output_type: console
+---
+
+# Load packages
+
+```{r}
+library(tidyverse)
+library(psych)
+library(summarytools)
+library(BioAge)
+library(ggpubr)
+library(geepack)
+library(corrplot)
+library(DescTools)
+library(ggridges)
+library(emmeans)
+library(interactions)
+library(crosstable)
+library(mice)
+library(naniar)
+library(visdat)
+library(miceadds)
+library(ggiraph)
+library(forestplot)
+library(MatchIt)
+library(ggbreak)
+library(cobalt)
+setwd("/Users/qiaofengye/Library/CloudStorage/OneDrive-ThePennsylvaniaStateUniversity/Research/PhysioAge")
+source("CodeScripts/RFunctions/kdm_calc_update.R")
+source("CodeScripts/RFunctions/kdm_calc_update_2.R")
+source("CodeScripts/RFunctions/hd_calc_update_2.R")
+```
+
+# Self-defined functions
+
+## Function for winsorizing outliers
+
+```{r}
+bio_winsorize <- function(var){
+  var_median <- median(var, na.rm = T)
+  var_iqr <- IQR(var, na.rm = T)
+  var_q1 <- quantile(var, na.rm = T, probs = 0.25)
+  var_q3 <- quantile(var, na.rm = T, probs = 0.75)
+  var_win <-  Winsorize(var, val = c(var_q1-1.5*var_iqr, var_q3+1.5*var_iqr))
+  return(var_win)
+}
+
+```
+
+## Function for scaling variables to 0-1 range for plotting purposes
+
+```{r}
+scale_p <- function(var){
+  var_min <- min(var, na.rm = T)
+  var_range <- max(var, na.rm = T) - min(var, na.rm = T)
+  var_new <- (var - var_min)/var_range
+  return(var_new)
+}
+```
+
+## Function for getting correlation between biomarkers and chronological age
+
+```{r}
+bio_age_cor <- function(biomarker_variable, age_var = "age", data = nhanes3_data_8to14,
+                        biomarker_dictionary = n3_biomarkers) {
+  data_sub <- data %>% dplyr::select(all_of(age_var), all_of(paste0(biomarker_variable, "_z")))
+  cor_res <- correlation::correlation(data = data_sub) %>% as.data.frame()
+  data.frame(biomarker_var = biomarker_variable,
+             biomarker_name = names(biomarker_dictionary[biomarker_dictionary == biomarker_variable]),
+             r = cor_res$r,
+             ci_low = cor_res$CI_low,
+             ci_high = cor_res$CI_high,
+             p = cor_res$p) %>%
+    return()
+}
+
+```
+
+# Read in and clean CHS data
+
+```{r}
+setwd("/Users/qiaofengye/Library/CloudStorage/OneDrive-ThePennsylvaniaStateUniversity/Research/PhysioAge")
+
+load("Data/chs_pheno_data.RData")
+load("Data/p50_data_clean_with_mcs.RData")
+
+# Check the variables
+## More specific CM types
+p50.data <- p50.data %>%
+  mutate(cm_cat_comp = case_when(cm_catPA=="No" & cm_catSA=="No" & cm_catN=="No" ~ "Comparison",
+                                 cm_catPA=="Yes" & cm_catSA=="No" & cm_catN=="No" ~ "Physical abuse",
+                                 cm_catPA=="No" & cm_catSA=="Yes" & cm_catN=="No" ~ "Sexual abuse",
+                                 cm_catPA=="No" & cm_catSA=="No" & cm_catN=="Yes" ~ "Neglect",
+                                 cm_catPA=="Yes" & cm_catSA=="Yes" & cm_catN=="No" ~ "Physical & sexual abuse",
+                                 cm_catPA=="Yes" & cm_catSA=="No" & cm_catN=="Yes" ~ "Physical abuse & neglect",
+                                 cm_catPA=="No" & cm_catSA=="Yes" & cm_catN=="Yes" ~ "Sexual abuse & neglect",
+                                 cm_catPA=="Yes" & cm_catSA=="Yes" & cm_catN=="Yes" ~ "Physical & sexual abuse, & neglect"))
+p50.data <- p50.data %>%
+  mutate(cm_cat_comp = factor(cm_cat_comp, 
+                              levels = c("Comparison", "Physical abuse", "Sexual abuse", "Neglect", "Physical & sexual abuse", "Physical abuse & neglect", "Sexual abuse & neglect")))
+freq(p50.data$cm_cat_comp)
+
+# Collapse polyvictimization
+p50.data <- p50.data %>%
+  mutate(cm_cat_comp_2 = case_when(cm_cat_comp == "Comparison" ~ "Comparison",
+                                   cm_cat_comp == "Physical abuse" ~ "Physical abuse",
+                                   cm_cat_comp == "Sexual abuse" ~ "Sexual abuse",
+                                   cm_cat_comp == "Neglect" ~ "Neglect",
+                                   cm_cat_comp %in% c("Physical & sexual abuse", "Physical abuse & neglect", "Sexual abuse & neglect") ~ "Polyvictimization"),
+         cm_cat_comp_2 = factor(cm_cat_comp_2, levels = c("Comparison", "Physical abuse", "Sexual abuse", "Neglect", "Polyvictimization")))
+freq(p50.data$cm_cat_comp_2)
+
+# Exclude children of trans-gender or other gender
+freq(p50.data$t1_gender_g2) # one child of trans male (female to male), one child of other gender
+p50.data <- p50.data %>%
+  filter(t1_gender_g2 %in% c("Female", "Male")) %>%
+  mutate(t1_gender_g2 = factor(t1_gender_g2, levels = c("Female", "Male")))
+
+# Collapse the levels of race
+freq(p50.data$t1_race_g2)
+p50.data <- p50.data %>%
+  mutate(t1_race_g2_recode = as.character(t1_race_g2)) %>%
+  mutate(t1_race_g2_recode = ifelse(t1_race_g2_recode %in% c("American Indian or Alaskan Native", "Asian", "More than One Race", "Native Hawaiian or Other Pacific Islander"), "Other", t1_race_g2_recode)) %>%
+  mutate(t1_race_g2_recode = factor(t1_race_g2_recode, levels = c("White", "Black or African American", "Other")))
+freq(p50.data$t1_race_g2_recode)
+
+# Make mean variable averaging the two measures of Tanner stage and categorical Tanner stage variables
+p50.data <- p50.data %>%
+  mutate(t1_tanner_average = (t1_tanner_bg + t1_tanner_pubic)/2,
+         t1_tanner_diff = abs(t1_tanner_bg - t1_tanner_pubic),
+         t1_tanner_pubic_cat = factor(t1_tanner_pubic, levels = c(1,2,3,4,5)),
+         t1_tanner_bg_cat = factor(t1_tanner_bg, levels = c(1,2,3,4,5)))
+
+# Sample ID and age
+p50.data <- p50.data %>%
+  mutate(g2id = as.character(g2id),
+         sampleID = g2id,
+         age = t1_age_g2)
+
+# Income bracket
+hist(p50.data$t1_income)
+freq(p50.data$t1_income)
+p50.data <- p50.data %>%
+  mutate(t1_income_bracket = case_when(t1_income %in% c(0, 1, 2, 3) ~ "$0-$39,999",
+                                       t1_income %in% c(4, 5, 6, 7) ~ "$40,000-$79,999",
+                                       t1_income %in% c(8, 9, 10, 11) ~ "$80,000 or above"),
+         t1_income_bracket = factor(t1_income_bracket, levels = c("$0-$39,999", "$40,000-$79,999", "$80,000 or above")))
+freq(p50.data$t1_income_bracket)
+
+chs_pheno_data <- chs_pheno_data %>%
+  mutate(g2id = as.character(g2id))
+
+p50.data <- p50.data %>%
+  left_join(chs_pheno_data %>%
+              dplyr::select(g2id, 
+                            t1_ppl_household),
+            by = "g2id")
+
+# Number of people in the household
+freq(p50.data$t1_ppl_household)
+p50.data <- p50.data %>%
+  mutate(t1_ppl_household = as.numeric(t1_ppl_household),
+         t1_ppl_household_recode = case_when(t1_ppl_household %in% c(1:3) ~ "1-3 people",
+                                             t1_ppl_household %in% c(4:6) ~ "4-6 people",
+                                             t1_ppl_household %in% c(7:10) ~"7 or more people"),
+         t1_ppl_household_recode = factor(t1_ppl_household_recode, levels = c("1-3 people", "4-6 people", "7 or more people")))
+
+freq(p50.data$t1_ppl_household_recode)
+
+```
+
+# Read in NHANES data
+
+```{r}
+setwd("/Users/qiaofengye/Library/CloudStorage/OneDrive-ThePennsylvaniaStateUniversity/Research/PhysioAge")
+
+load("NHANES3/Data_reformatted/nhanes3_data_5to20.RData")
+load("NHANES4/nhanes4_data_5to20.RData")
+
+```
+
+# Clean the NHANES III data
+
+```{r}
+nhanes3_data_youth_2 <- nhanes3_data_youth_2 %>%
+  mutate(age = age_exam_year)
+
+# change the level order of sex
+nhanes3_data_youth_2$sex <- factor(nhanes3_data_youth_2$sex, levels = c("Female", "Male"))
+
+# only keep children aged 8 to 14 years 
+nhanes3_data_8to14 <- nhanes3_data_youth_2 %>%
+  filter(age >= 8 & age <= 14)
+
+# Distribution of age in NHANES3
+ggplot() +
+  geom_density(data = nhanes3_data_8to14, aes(x = age), color = "pink", fill = "pink", alpha = 0.5) +
+  geom_density(data = p50.data, aes(x = t1_age_g2), color = "lightblue", fill = "lightblue", alpha = 0.5) +
+  theme_bw()
+
+
+```
+
+# Clean the NHANES IV data
+
+```{r}
+nhanes4_data_youth_2 <- nhanes4_data_youth_2 %>%
+  mutate(age = age_exam_year)
+
+nhanes4_data_youth_2 <- nhanes4_data_youth_2 %>%
+  mutate(dbp = ifelse(dbp == 0, NA, dbp))
+
+## change the level order of sex
+nhanes4_data_youth_2$sex <- factor(nhanes4_data_youth_2$sex, levels = c("Female", "Male"))
+
+## change the levels of self-rated health
+nhanes4_data_youth_2$health <- as.character(nhanes4_data_youth_2$health)
+unique(nhanes4_data_youth_2$health)
+nhanes4_data_youth_2$health <- ifelse(nhanes4_data_youth_2$health %in% c("Refused", "Don't know"), NA, 
+                                      ifelse(nhanes4_data_youth_2$health == "Excellent,", "Excellent",
+                                             ifelse(nhanes4_data_youth_2$health == "Good,", "Good",
+                                                    ifelse(nhanes4_data_youth_2$health == "Very good,", "Very good",
+                                                           ifelse(nhanes4_data_youth_2$health == "Fair, or", "Fair",
+                                                                  ifelse(nhanes4_data_youth_2$health == "Poor?", "Poor", nhanes4_data_youth_2$health))))))
+nhanes4_data_youth_2$health <- factor(nhanes4_data_youth_2$health, levels = c("Poor", "Fair", "Good", "Very good", "Excellent"))
+levels(nhanes4_data_youth_2$health)
+freq(nhanes4_data_youth_2$health)
+
+## change the levels of race_ethnicity.
+nhanes4_data_youth_2 <- nhanes4_data_youth_2 %>%
+  mutate(race_ethnicity = case_when(race_ethnicity == "Non-Hispanic White" ~ "Non-Hispanic White",
+                                    race_ethnicity == "Non-Hispanic Black" ~ "Non-Hispanic Black",
+                                    race_ethnicity %in% c("Mexican American", "Other Hispanic") ~ "Hispanic",
+                                    race_ethnicity %in% c("Non-Hispanic Asian", "Other Race - Including Multi-Rac") ~ "Other"),
+         race_ethnicity = factor(race_ethnicity, levels = c("Non-Hispanic White", "Non-Hispanic Black", "Hispanic", "Other")))
+
+freq(nhanes4_data_youth_2$race_ethnicity)
+
+# only keep children aged 8 to 14 years 
+nhanes4_data_8to14 <- nhanes4_data_youth_2 %>%
+  filter(age >= 8 & age <= 14)
+
+```
+
+# Get names of biomarkers available in the NHANES III
+
+```{r}
+n3_biomarkers <- c(`%BASO` = "basopa", 
+                   `%EOSI` = "eosnpa", 
+                   `%LYMP` = "lymph", 
+                   `%MONO` = "monopa", 
+                   `%NEUT` = "neut",
+                   `WBC` = "wbc",
+                   `RBC` = "rbc",
+                   `MCV` = "mcv", 
+                   `RDW` = "rdw",  
+                   `HGB` = "hgb", 
+                   `HCT` = "hct", 
+                   `MCH` = "mch", 
+                   `MCHC` = "mchc",
+                   `HbA1c`= "hba1c", 
+                   `PLT` = "plt", 
+                   `MPV` = "mpv",
+                   `CHOL` = "totchol",
+                   `CHOL/HDLc`= "chol_hdl_ratio", 
+                   `non-HDLc`= "non_hdl", 
+                   `HDLc` = "hdl", 
+                   `TG` = "trig",  
+                   `Fe` = "iron",
+                   `Arm Circum` = "arm_circum", 
+                   `DBP` = "dbp", 
+                   `SBP` = "sbp",
+                   `HR` = "pulse",
+                   `BMI` = "bmi")
+
+```
+
+# Get CHS biomarker variable names
+
+```{r}
+chs_biomarkers <- c(CHOL = "t1_cholesterol", 
+                    HDLc = "t1_hdl", 
+                    TG = "t1_triglycerides", 
+                    LDLc = "t1_ldl",
+                    `CHOL/HDLc` = "t1_chol_hdlc_ratio", 
+                    `non-HDLc` = "t1_non_hdl", 
+                    CRP = "t1_crp", 
+                    Glucose = "t1_glucose",
+                    BUN = "t1_urea_nitrogen_bun", 
+                    Creatinine = "t1_creatinine", 
+                    `Na` = "t1_sodium",
+                    `K` = "t1_potassium", 
+                    `Cl` = "t1_chloride", 
+                    `Ca` = "t1_calcium", 
+                    `P` = "t1_phosphate_aka_phosphorus",
+                    `Fe` = "t1_iron",
+                    Protein = "t1_protein", 
+                    ALB = "t1_albumin", 
+                    GLB = "t1_globulin",
+                    `A/G` = "t1_albumin_globulin_ratio", 
+                    ALP = "t1_alkaline_phosphates", 
+                    ALT = "t1_alt",
+                    AST = "t1_ast", 
+                    HbA1c = "t1_hemoglobin_a1c",
+                    Insulin = "t1_insulin",
+                    UA = "t1_uric_acid", 
+                    TBIL = "t1_bilirubin_total",
+                    LDH = "t1_ld",
+                    WBC = "t1_white_blood_cell_count", 
+                    RBC = "t1_red_blood_cell_count",
+                    HGB = "t1_hemoglobin", 
+                    HCT = "t1_hematocrit", 
+                    MCV = "t1_mcv", 
+                    MCH = "t1_mch",
+                    MCHC = "t1_mchc", 
+                    RDW = "t1_rdw", 
+                    PLT = "t1_platelet_count", 
+                    MPV = "t1_mpv",
+                    `%NEUT` = "t1_neutrophils", 
+                    `%LYMP` = "t1_lymphocytes", 
+                    `%MONO` = "t1_monocytes",
+                    `%EOSI` = "t1_eosinophils", 
+                    `%BASO` = "t1_basophils", 
+                    BMI = "t1_bmi", 
+                    `Arm Circum` = "t1_health_rarm_mean", 
+                    SBP = "t1_health_systolic_mean",
+                    DBP = "t1_health_diastolic_mean", 
+                    HR = "t1_health_bpm_mean")
+
+
+```
+
+# Rename biomarkers in the CHS dataset
+
+```{r}
+chs_biomarkers_n3 <- chs_biomarkers[names(n3_biomarkers)]
+p50.data[,n3_biomarkers] <- p50.data[,chs_biomarkers_n3]
+
+```
+
+# Winsorize biomarker outliers in CHS
+
+```{r, fig.width=8, fig.height=7}
+# Winsorize biomarker outliers
+p50.data[, paste0(n3_biomarkers, "_original")] <- p50.data[, n3_biomarkers]
+p50.data[, n3_biomarkers] <- apply(p50.data[, paste0(n3_biomarkers, "_original")], 2, bio_winsorize)
+
+# Percent winsorized
+prop_winsorizd <- colMeans(p50.data[, n3_biomarkers] != p50.data[, paste0(n3_biomarkers, "_original")], na.rm = T)
+prop_winsorizd <- as.data.frame(prop_winsorizd) %>% as_tibble(rownames = "biomarker_var")
+
+# Scale the data to 0-1 range for plotting purposes
+scaled_data <- p50.data[, c("g2id", n3_biomarkers, paste0(n3_biomarkers, "_original"))]
+scaled_data[,c(n3_biomarkers, paste0(n3_biomarkers, "_original"))] <- apply(scaled_data[,c(n3_biomarkers, paste0(n3_biomarkers, "_original"))], 2, scale_p)
+
+# Pivot the data to long format for plotting purposes
+biomarker_data_long <- scaled_data %>%
+  pivot_longer(cols = !g2id,
+               names_to = "biomarker",
+               values_to = "value") %>%
+  mutate(winsorized = str_extract(biomarker, pattern = "original"),
+         winsorized = case_when(is.na(winsorized) ~ "Yes",
+                                winsorized == "original" ~ "No"),
+         biomarker = str_remove(biomarker, pattern = "_original"),
+         plot_panel = case_when(biomarker %in% n3_biomarkers[1:floor((length(n3_biomarkers)/2))] ~ "Panel 1",
+                                biomarker %in% n3_biomarkers[(floor(length(n3_biomarkers)/2)+1):length(chs_biomarkers)] ~ "Panel 2"),
+         biomarker_var = biomarker,
+         biomarker = factor(biomarker, levels = n3_biomarkers, labels = names(n3_biomarkers)))
+
+biomarker_data_long <- biomarker_data_long %>%
+  left_join(prop_winsorizd, by = "biomarker_var") %>%
+  mutate(biomarker = paste0(biomarker, " (", round(prop_winsorizd*100, 1), "%)"))
+
+# Plot the non-winsorized and wisorized variables
+ggplot(biomarker_data_long) +
+  geom_density_ridges(aes(x = value, y = biomarker, fill = winsorized), alpha = 0.5) +
+  scale_fill_discrete(name = "Winsorized") +
+  labs(x = "Value", y = "Biomarker") +
+  facet_wrap(~plot_panel, scales = "free_y") +
+  theme_bw()
+
+```
+
+# Winsorize biomarker outliers in NHANES III
+
+## Dataset with participants aged 8-14 years
+
+```{r, fig.width=8, fig.height=7}
+# Winsorize biomarker outliers
+nhanes3_data_8to14[, paste0(n3_biomarkers, "_original")] <- nhanes3_data_8to14[, n3_biomarkers]
+nhanes3_data_8to14[, n3_biomarkers] <- apply(nhanes3_data_8to14[, paste0(n3_biomarkers, "_original")], 2, bio_winsorize)
+
+# Percent winsorized
+prop_winsorizd <- colMeans(nhanes3_data_8to14[, n3_biomarkers] != nhanes3_data_8to14[, paste0(n3_biomarkers, "_original")], na.rm = T)
+prop_winsorizd <- as.data.frame(prop_winsorizd) %>% as_tibble(rownames = "biomarker_var")
+
+# Scale the data to 0-1 range for plotting purposes
+scaled_data <- nhanes3_data_8to14[, c("sampleID", n3_biomarkers, paste0(n3_biomarkers, "_original"))]
+scaled_data[,c(n3_biomarkers, paste0(n3_biomarkers, "_original"))] <- apply(scaled_data[,c(n3_biomarkers, paste0(n3_biomarkers, "_original"))], 2, scale_p)
+
+# Pivot the data to long format for plotting purposes
+biomarker_data_long <- scaled_data %>%
+  pivot_longer(cols = !sampleID,
+               names_to = "biomarker",
+               values_to = "value") %>%
+  mutate(winsorized = str_extract(biomarker, pattern = "original"),
+         winsorized = case_when(is.na(winsorized) ~ "Yes",
+                                winsorized == "original" ~ "No"),
+         biomarker = str_remove(biomarker, pattern = "_original"),
+         plot_panel = case_when(biomarker %in% n3_biomarkers[1:floor(length(n3_biomarkers)/2)] ~ "Panel 1",
+                                biomarker %in% n3_biomarkers[(floor(length(n3_biomarkers)/2)+1):length(n3_biomarkers)] ~ "Panel 2"),
+         biomarker_var = biomarker,
+         biomarker = factor(biomarker, levels = n3_biomarkers, labels = names(n3_biomarkers)))
+
+biomarker_data_long <- biomarker_data_long %>%
+  left_join(prop_winsorizd, by = "biomarker_var") %>%
+  mutate(biomarker = paste0(biomarker, " (", round(prop_winsorizd*100, 1), "%)"))
+
+# Plot the non-winsorized and wisorized variables
+ggplot(biomarker_data_long) +
+  geom_density_ridges(aes(x = value, y = biomarker, fill = winsorized), alpha = 0.5) +
+  scale_fill_discrete(name = "Winsorized") +
+  labs(x = "Value", y = "Biomarker") +
+  facet_wrap(~ plot_panel, scales = "free_y") +
+  theme_bw()
+
+```
+
+# Winsorize biomarker outliers in NHANES IV
+
+## Dataset with participants aged 8-14 years
+
+```{r, fig.width=8, fig.height=7}
+# Winsorize biomarker outliers
+nhanes4_data_8to14[, paste0(n3_biomarkers, "_original")] <- nhanes4_data_8to14[, n3_biomarkers]
+nhanes4_data_8to14[, n3_biomarkers] <- apply(nhanes4_data_8to14[, paste0(n3_biomarkers, "_original")], 2, bio_winsorize)
+
+# Percent winsorized
+prop_winsorizd <- colMeans(nhanes4_data_8to14[, n3_biomarkers] != nhanes4_data_8to14[, paste0(n3_biomarkers, "_original")], na.rm = T)
+prop_winsorizd <- as.data.frame(prop_winsorizd) %>% as_tibble(rownames = "biomarker_var")
+
+# Scale the data to 0-1 range for plotting purposes
+scaled_data <- nhanes4_data_8to14[, c("sampleID", n3_biomarkers, paste0(n3_biomarkers, "_original"))]
+scaled_data[,c(n3_biomarkers, paste0(n3_biomarkers, "_original"))] <- apply(scaled_data[,c(n3_biomarkers, paste0(n3_biomarkers, "_original"))], 2, scale_p)
+
+# Pivot the data to long format for plotting purposes
+biomarker_data_long <- scaled_data %>%
+  pivot_longer(cols = !sampleID,
+               names_to = "biomarker",
+               values_to = "value") %>%
+  mutate(winsorized = str_extract(biomarker, pattern = "original"),
+         winsorized = case_when(is.na(winsorized) ~ "Yes",
+                                winsorized == "original" ~ "No"),
+         biomarker = str_remove(biomarker, pattern = "_original"),
+         plot_panel = case_when(biomarker %in% n3_biomarkers[1:floor(length(n3_biomarkers)/2)] ~ "Panel 1",
+                                biomarker %in% n3_biomarkers[(floor(length(n3_biomarkers)/2)+1):length(n3_biomarkers)] ~ "Panel 2"),
+         biomarker_var = biomarker,
+         biomarker = factor(biomarker, levels = n3_biomarkers, labels = names(n3_biomarkers)))
+
+biomarker_data_long <- biomarker_data_long %>%
+  left_join(prop_winsorizd, by = "biomarker_var") %>%
+  mutate(biomarker = paste0(biomarker, " (", round(prop_winsorizd*100, 1), "%)"))
+
+# Plot the non-winsorized and wisorized variables
+ggplot(biomarker_data_long) +
+  geom_density_ridges(aes(x = value, y = biomarker, fill = winsorized), alpha = 0.5) +
+  scale_fill_discrete(name = "Winsorized") +
+  labs(x = "Value", y = "Biomarker") +
+  facet_wrap(~ plot_panel, scales = "free_y") +
+  theme_bw()
+
+```
+
+# Check the consistency in biomarker distributions between NHANES III and CHS
+
+```{r, fig.width=12, fig.height=7}
+# Unweighted
+n3_bio_data_long <- nhanes3_data_8to14[, c("sampleID", n3_biomarkers)] %>%
+  pivot_longer(cols = all_of(unname(n3_biomarkers)), names_to = "biomarker_var", values_to = "biomarker_value") %>%
+  mutate(cohort = "NHANES III")
+
+chs_bio_data_long <- p50.data[, c("sampleID", n3_biomarkers)] %>%
+  pivot_longer(cols = all_of(unname(n3_biomarkers)), names_to = "biomarker_var", values_to = "biomarker_value") %>%
+  mutate(cohort = "CHS")
+
+bio_data_comb <- rbind(n3_bio_data_long, chs_bio_data_long)
+
+bio_data_comb$biomarker_name <- names(n3_biomarkers[match(bio_data_comb$biomarker_var, n3_biomarkers)])
+
+ggplot(bio_data_comb, aes(x = biomarker_value, group = cohort, color = cohort, fill = cohort)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~biomarker_name, scales = "free") +
+  labs(x = "Biomarker value", y = "Density") +
+  scale_color_discrete(name = "Cohort") +
+  scale_fill_discrete(name = "Cohort") +
+  theme_bw()
+
+```
+
+# Get correlations between biomarkers and age in NHANES III
+
+```{r, fig.width=6, fig.height=4.5}
+# Z-standardize the biomarkers
+nhanes3_data_8to14[, paste0(n3_biomarkers,"_z")] <- apply(nhanes3_data_8to14[, n3_biomarkers], 2, scale)
+describe(nhanes3_data_8to14[, paste0(n3_biomarkers,"_z")])
+
+# Pivot the data to long format for plotting purpose
+nhanes3_data_8to14_long <- nhanes3_data_8to14 %>%
+  dplyr::select(sampleID, age, sex, all_of(paste0(n3_biomarkers, "_z"))) %>%
+  pivot_longer(cols = paste0(n3_biomarkers, "_z"), names_to = "biomarker_var", values_to = "biomarker_z_value") %>%
+  mutate(biomarker_var = str_remove(biomarker_var, "_z"))
+
+# Get the correlation between biomarkers and age
+bio_age_cor_res <- lapply(n3_biomarkers, bio_age_cor) %>% reduce(rbind) %>% arrange(r)
+bio_age_cor_res$biomarker_name_ordered <- factor(bio_age_cor_res$biomarker_name, levels = bio_age_cor_res$biomarker_name)
+
+# Join the correlation data with the long formatted data
+nhanes3_data_8to14_long <- nhanes3_data_8to14_long %>%
+  left_join(bio_age_cor_res, by = "biomarker_var")
+
+# Plot the z-standardized biomarkers with age
+line_plot <- ggplot(nhanes3_data_8to14_long, aes(x = age, y = biomarker_z_value, group = biomarker_name, color = r)) +
+  geom_smooth(se = F, method = "lm", formula = y~x) +
+  labs(x = "Chronological age (years)", y = "Biomarker z score") +
+  scale_color_gradient2(name = "R in NHANES III (8-14years)", breaks = c(-0.3, 0, 0.3),
+                        low = scales::muted("blue"), high = scales::muted("red")) +
+  theme_bw() +
+  theme(legend.title.position = "top",
+        plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "inches"))
+
+bar_plot <- ggplot(bio_age_cor_res) +
+  geom_col(aes(x = abs(r), y = biomarker_name_ordered, fill = r), color = "gray50") +
+  labs(x = "Absolute R with age", y = "") +
+  scale_fill_gradient2(name = "R in comparison group", breaks = c(-0.3, 0, 0.3),
+                       low = scales::muted("blue"), high = scales::muted("red")) +
+  scale_x_continuous(limits = c(0, 0.6)) +
+  theme_bw() +
+  theme(legend.title.position = "top",
+        plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "inches"))
+
+ggarrange(line_plot, bar_plot,
+          ncol = 2, nrow = 1, common.legend = T)
+
+```
+
+# Exclude biomarkers with correlation with age less than 0.1
+
+```{r}
+excluded_biomarkers_2 <- bio_age_cor_res %>%
+  filter(abs(r) < 0.1) %>%
+  dplyr::select(biomarker_var) %>%
+  unlist()
+
+names(excluded_biomarkers_2) <- NULL
+
+n3_biomarkers_original <- n3_biomarkers
+n3_biomarkers <- n3_biomarkers[!(n3_biomarkers %in% excluded_biomarkers_2)]
+
+```
+
+# Exclude biomarkers with inconsistent distribution between NHANES III and CHS
+
+```{r}
+excluded_biomarkers_3 <- c("basopa", "dbp", "monopa", "mpv")
+n3_biomarkers <- n3_biomarkers[!(n3_biomarkers %in% excluded_biomarkers_3)]
+
+```
+
+# Correlation between biomarkers in NHANES III
+
+```{r, fig.width=5, fig.height=5}
+# Make a correlation heat map
+bio_cor_res_1 <- Hmisc::rcorr(as.matrix(nhanes3_data_8to14[,n3_biomarkers]), type = "pearson")
+bio_cor_res_1$r
+colnames(bio_cor_res_1$r) <- names(n3_biomarkers)
+rownames(bio_cor_res_1$r) <- names(n3_biomarkers)
+
+corrplot(bio_cor_res_1$r, method = "color", tl.cex = 0.7)
+
+
+# Exclude biomarkers based on their correlations with each other (abs(r) > 0.4)
+bio_cor_res <- correlation::correlation(nhanes3_data_8to14[,n3_biomarkers])
+
+nobs <- describe(nhanes3_data_8to14[,n3_biomarkers]) %>% 
+  as_tibble(rownames = "biomarker_var") %>% 
+  dplyr::select(biomarker_var, n) %>%
+  mutate(biomarker = biomarker_var)
+
+bio_cor_res <- bio_cor_res %>%
+  left_join(nobs, by = c("Parameter1" = "biomarker_var")) %>%
+  mutate(Parameter1_n = n) %>%
+  dplyr::select(-n) %>%
+  left_join(nobs, by = c("Parameter2" = "biomarker_var")) %>%
+  mutate(Parameter2_n = n) %>%
+  dplyr::select(-n)
+
+exclude_bio <- function(cor_res, abs_r_threshold = 0.4){
+  cor_res_new <- cor_res %>%
+    filter(abs(r) > abs_r_threshold)
+  par1 <- cor_res_new$Parameter1
+  par2 <- cor_res_new$Parameter2
+  par <- c(par1, par2)
+  biomarkers_count <- freq(par)[,1]
+  biomarkers_count <- biomarkers_count[-((length(biomarkers_count)-1):length(biomarkers_count))]
+  biomarkers_count <- biomarkers_count %>% sort(decreasing = T)
+  biomarker_exclude <- names(biomarkers_count)[1]
+  cor_res_new <- cor_res_new %>%
+    filter(Parameter1 != biomarker_exclude & Parameter2 != biomarker_exclude)
+  return(list(cor_res_new = cor_res_new,
+              biomarker_exclude = biomarker_exclude))
+}
+
+i <- 1
+excluded_biomarkers <- as.vector(NULL)
+while (nrow(bio_cor_res) != 0){
+  exclusion <- exclude_bio(cor_res = bio_cor_res)
+  bio_cor_res <- exclusion$cor_res_new
+  excluded_biomarkers[i] <- exclusion$biomarker_exclude
+  i <- i + 1
+}
+
+n3_biomarkers_update <- n3_biomarkers[!(n3_biomarkers %in% excluded_biomarkers)]
+
+# Make a correlation heat map with the updated biomarker panel
+bio_cor_res_2 <- Hmisc::rcorr(as.matrix(nhanes3_data_8to14[,n3_biomarkers_update]), type = "pearson")
+bio_cor_res_2$r
+colnames(bio_cor_res_2$r) <- names(n3_biomarkers_update)
+rownames(bio_cor_res_2$r) <- names(n3_biomarkers_update)
+
+corrplot(bio_cor_res_2$r, method = "color", tl.cex = 0.8)
+
+```
+
+# Exclude participants in NHANES III with missing data on all the 9 selected biomarkers
+
+```{r}
+nhanes3_data_8to14_original <- nhanes3_data_8to14
+nhanes3_data_8to14 <-  nhanes3_data_8to14[rowSums(is.na(nhanes3_data_8to14[,n3_biomarkers_update])) < length(n3_biomarkers_update),]
+
+```
+
+# Exclude participants with any missing data (complete case analyses for the following steps)
+
+```{r}
+# NHANES III (8-14 years)
+nhanes3_data_8to14 <- nhanes3_data_8to14 %>%
+  filter(!is.na(age)) %>%
+  filter(!is.na(sex)) %>%
+  filter(!is.na(race)) %>%
+  filter(!is.na(ethnicity))
+
+nhanes3_data_8to14 <-  nhanes3_data_8to14[rowSums(is.na(nhanes3_data_8to14[,n3_biomarkers_update])) == 0,]
+
+# CHS (8-14 years)
+p50.data.original <- p50.data
+p50.data <- p50.data %>%
+  filter(!is.na(t1_age_g2)) %>%
+  filter(!is.na(t1_gender_g2)) %>%
+  filter(!is.na(t1_race_g2_recode)) %>%
+  filter(!is.na(t1_eth_g2)) %>%
+  filter(!is.na(t1_income_bracket)) %>%
+  filter(!is.na(t1_ppl_household_recode)) %>%
+  filter(!is.na(t1_bmi_percentile))
+
+p50.data <- p50.data[rowSums(is.na(p50.data[,n3_biomarkers_update])) == 0, ]
+
+# NHANES IV (8-14 years)
+nhanes4_data_8to14_original <- nhanes4_data_8to14
+nhanes4_data_8to14 <- nhanes4_data_8to14 %>%
+  filter(!is.na(age)) %>%
+  filter(!is.na(sex)) %>%
+  filter(!is.na(race_ethnicity)) %>%
+  filter(!is.na(poverty_ratio))
+nhanes4_data_8to14 <-  nhanes4_data_8to14[rowSums(is.na(nhanes4_data_8to14[,n3_biomarkers_update])) == 0,]
+
+```
+
+# Match NHANES III participants with CHS participants by age, sex, and race/ethnicity
+
+```{r, fig.width=8, fig.height=6}
+# Check variables in NHANES3
+## remove the extra level of race
+freq(nhanes3_data_8to14$race)
+nhanes3_data_8to14$race <- factor(nhanes3_data_8to14$race, levels = c("White", "Black", "Other"))
+freq(nhanes3_data_8to14$ethnicity)
+## recode ethnicity
+nhanes3_data_8to14$ethnicity <- case_when(nhanes3_data_8to14$ethnicity == "Not Hispanic" ~ "Non-Hispanic",
+                                          nhanes3_data_8to14$ethnicity %in% c("Mexican-American", "Other Hispanic") ~ "Hispanic")
+nhanes3_data_8to14$ethnicity <- factor(nhanes3_data_8to14$ethnicity, levels = c("Non-Hispanic", "Hispanic"))
+## check sex
+freq(nhanes3_data_8to14$sex)
+## rounded age for exact matching
+hist(nhanes3_data_8to14$age)
+nhanes3_data_8to14$age_rounded <- round(nhanes3_data_8to14$age)
+hist(nhanes3_data_8to14$age_rounded)
+## make a variable indicating cohort
+nhanes3_data_8to14$cohort <- "NHANES III"
+
+# Check variables in CHS
+## rename levels of race
+freq(p50.data$t1_race_g2_recode)
+p50.data <- p50.data %>%
+  mutate(race = factor(t1_race_g2_recode, levels = c("White", "Black or African American", "Other"),
+                       labels = c("White", "Black", "Other")))
+freq(p50.data$race)
+
+## check on ethnicity
+freq(p50.data$t1_eth_g2)
+p50.data$ethnicity <- p50.data$t1_eth_g2
+freq(p50.data$ethnicity)
+
+## check on sex
+freq(p50.data$t1_gender_g2)
+p50.data$sex <- p50.data$t1_gender_g2
+freq(p50.data$sex)
+
+## rounded age for exact matching
+hist(p50.data$t1_age_g2)
+p50.data$age_rounded <- round(p50.data$t1_age_g2)
+hist(p50.data$age_rounded)
+
+## make a variable indicating cohort
+p50.data$cohort <- "CHS"
+
+# Combine the two datasets for matching procedure
+data_for_match <- rbind(na.omit(nhanes3_data_8to14[,c("cohort", "sampleID", "age_rounded", "sex", "race", "ethnicity")]),
+                        na.omit(p50.data[,c("cohort", "sampleID", "age_rounded", "sex", "race", "ethnicity")]))
+
+data_for_match <- data_for_match %>%
+  mutate(cohort = factor(cohort, levels = c("NHANES III", "CHS")))
+freq(data_for_match$cohort)
+
+# Matching
+m_out <- matchit(cohort ~ age_rounded + sex + race + ethnicity,
+                 data = data_for_match, method = "exact",
+                 replace = F)
+
+## check on matching matrix
+head(m_out$match.matrix)
+
+## check on matched data
+mdata <- match.data(m_out)
+sum(mdata[mdata$cohort == "CHS",]$weights)
+sum(mdata[mdata$cohort == "NHANES III",]$weights)
+
+# Merge the matching weights with the original data
+nhanes3_data_8to14 <- mdata %>%
+  dplyr::select(sampleID, subclass, weights) %>%
+  right_join(nhanes3_data_8to14, by = "sampleID")
+
+p50.data <- mdata %>%
+  dplyr::select(sampleID, subclass, weights) %>%
+  right_join(p50.data, by = "sampleID")
+
+# Check the distribution of matched variables in two groups
+p1 <- bal.plot(m_out, var.name = "age_rounded", which = "both", grid = T,
+                   sample.names = c("Unmatched", "Matched")) + 
+  scale_fill_discrete(name = "Cohort",
+                      labels = c("0" = "NHANES III", "1" = "CHS")) +
+  labs(title = "") +
+  xlab("Age (rounded to integer)")
+
+p2 <- bal.plot(m_out, var.name = "sex", which = "both", grid = T,
+                   sample.names = c("Unmatched", "Matched")) + 
+  scale_fill_discrete(name = "Cohort",
+                      labels = c("0" = "NHANES III", "1" = "CHS")) +
+  labs(title = "") +
+  xlab("Sex")
+
+p3 <- bal.plot(m_out, var.name = "race", which = "both", grid = T,
+                   sample.names = c("Unmatched", "Matched")) + 
+  scale_fill_discrete(name = "Cohort",
+                      labels = c("0" = "NHANES III", "1" = "CHS")) +
+  labs(title = "") +
+  xlab("Race")
+
+p4 <- bal.plot(m_out, var.name = "ethnicity", which = "both", grid = T,
+                   sample.names = c("Unmatched", "Matched")) + 
+  scale_fill_discrete(name = "Cohort",
+                      labels = c("0" = "NHANES III", "1" = "CHS")) +
+  labs(title = "") +
+  xlab("Ethnicity")
+
+ggarrange(p1, p2, p3, p4, nrow = 2, ncol = 2, common.legend = T, labels = "AUTO")
+
+```
+
+# Check the consistency in biomarker distributions between NHANES III and CHS
+
+```{r, fig.width=8.5, fig.height=5}
+# Unweighted
+n3_bio_data_long <- nhanes3_data_8to14[, c("sampleID", n3_biomarkers_update)] %>%
+  pivot_longer(cols = all_of(unname(n3_biomarkers_update)), names_to = "biomarker_var", values_to = "biomarker_value") %>%
+  mutate(cohort = "NHANES III")
+
+chs_bio_data_long <- p50.data[, c("sampleID", n3_biomarkers_update)] %>%
+  pivot_longer(cols = all_of(unname(n3_biomarkers_update)), names_to = "biomarker_var", values_to = "biomarker_value") %>%
+  mutate(cohort = "CHS")
+
+bio_data_comb <- rbind(n3_bio_data_long, chs_bio_data_long)
+
+bio_data_comb$biomarker_name <- names(n3_biomarkers[match(bio_data_comb$biomarker_var, n3_biomarkers)])
+
+ggplot(bio_data_comb, aes(x = biomarker_value, group = cohort, color = cohort, fill = cohort)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~biomarker_name, scales = "free") +
+  labs(x = "Biomarker value", y = "Density") +
+  scale_color_discrete(name = "Cohort") +
+  scale_fill_discrete(name = "Cohort") +
+  theme_bw()
+
+# Weighted
+n3_bio_data_long <- nhanes3_data_8to14[, c("sampleID", "weights", n3_biomarkers_update)] %>%
+  pivot_longer(cols = all_of(unname(n3_biomarkers_update)), names_to = "biomarker_var", values_to = "biomarker_value") %>%
+  mutate(cohort = "NHANES III") %>%
+  na.omit()
+
+chs_bio_data_long <- p50.data[, c("sampleID", "weights", n3_biomarkers_update)] %>%
+  pivot_longer(cols = all_of(unname(n3_biomarkers_update)), names_to = "biomarker_var", values_to = "biomarker_value") %>%
+  mutate(cohort = "CHS") %>%
+  na.omit()
+
+bio_data_comb <- rbind(n3_bio_data_long, chs_bio_data_long)
+bio_data_comb$biomarker_name <- names(n3_biomarkers[match(bio_data_comb$biomarker_var, n3_biomarkers)])
+
+ggplot(bio_data_comb, aes(x = biomarker_value, group = cohort, color = cohort, fill = cohort, weight = weights)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~biomarker_name, scales = "free") +
+  labs(x = "Biomarker value", y = "Density") +
+  scale_color_discrete(name = "Cohort") +
+  scale_fill_discrete(name = "Cohort") +
+  theme_bw()
+
+describeBy(biomarker_value ~ cohort + biomarker_name, data = bio_data_comb)
+
+```
+
+# KDM calculation
+
+```{r}
+kdm_ref_female <- kdm_calc_update_2(data = nhanes3_data_8to14 %>% 
+                                      filter(!is.na(weights)) %>%
+                                      filter(sex == "Female"),
+                                  biomarkers = n3_biomarkers_update)
+
+kdm_ref_male <- kdm_calc_update_2(data = nhanes3_data_8to14 %>% 
+                                    filter(!is.na(weights)) %>%
+                                    filter(sex == "Male"),
+                                biomarkers = n3_biomarkers_update)
+
+
+kdm_ref_female$data$kdm_dev <- residuals(lm(kdm ~ age, data = kdm_ref_female$data, na.action = na.exclude))
+kdm_ref_male$data$kdm_dev <- residuals(lm(kdm ~ age, data = kdm_ref_male$data, na.action = na.exclude))
+
+kdm_ref_data <- rbind(kdm_ref_female$data, kdm_ref_male$data) %>% dplyr::select(sampleID, kdm, kdm_dev)
+
+nhanes3_data_8to14 <- nhanes3_data_8to14 %>%
+  left_join(kdm_ref_data, by = "sampleID")
+
+kdm_female <- kdm_calc_update(data = p50.data %>%
+                                filter(!is.na(weights)) %>%
+                                filter(t1_gender_g2 == "Female"),
+                              biomarkers = n3_biomarkers_update,
+                              fit = kdm_ref_female$fit,
+                              s_ba2 = kdm_ref_female$fit$s_ba2)
+
+kdm_male <- kdm_calc_update(data = p50.data %>%
+                              filter(!is.na(weights)) %>%
+                              filter(t1_gender_g2 == "Male"),
+                            biomarkers = n3_biomarkers_update,
+                            fit = kdm_ref_male$fit,
+                            s_ba2 = kdm_ref_male$fit$s_ba2)
+kdm_female$data$kdm_dev <- residuals(lm(kdm ~ t1_age_g2, data = kdm_female$data, na.action = na.exclude))
+kdm_male$data$kdm_dev <- residuals(lm(kdm ~ t1_age_g2, data = kdm_male$data, na.action = na.exclude))
+
+kdm_data <- rbind(kdm_female$data, kdm_male$data) %>% dplyr::select(g2id, kdm, kdm_dev)
+
+p50.data <- p50.data %>%
+  left_join(kdm_data, by = "g2id")
+
+
+```
+
+# HD calculation
+
+```{r}
+hd_ref_female <- hd_calc_update_2(data = nhanes3_data_8to14 %>% 
+                                 filter(!is.na(weights)) %>%
+                                 filter(sex == "Female"),
+                              reference = nhanes3_data_8to14 %>% 
+                                 filter(!is.na(weights)) %>%
+                                 filter(sex == "Female"),
+                               biomarkers = n3_biomarkers_update)
+
+hd_ref_male <- hd_calc_update_2(data = nhanes3_data_8to14 %>% 
+                              filter(!is.na(weights)) %>%
+                              filter(sex == "Male"),
+                            reference = nhanes3_data_8to14 %>% 
+                              filter(!is.na(weights)) %>%
+                              filter(sex == "Male"),
+                            biomarkers = n3_biomarkers_update)
+
+hd_ref_female$data$hd_log_dev <- residuals(lm(hd_log ~ age, data = hd_ref_female$data, na.action = na.exclude))
+hd_ref_male$data$hd_log_dev <- residuals(lm(hd_log ~ age, data = hd_ref_male$data, na.action = na.exclude))
+
+hd_ref_data <- rbind(hd_ref_female$data, hd_ref_male$data) %>% dplyr::select(sampleID, hd, hd_log, hd_log_dev)
+
+nhanes3_data_8to14 <- nhanes3_data_8to14 %>%
+  left_join(hd_ref_data, by = "sampleID")
+
+
+
+# CHS
+hd_female <- hd_calc_update_2(data = p50.data %>% 
+                                filter(!is.na(weights)) %>%
+                                filter(t1_gender_g2 == "Female"),
+                              reference = nhanes3_data_8to14 %>% 
+                                 filter(!is.na(weights)) %>%
+                                 filter(sex == "Female"),
+                               biomarkers = n3_biomarkers_update)
+
+hd_male <- hd_calc_update_2(data = p50.data %>%
+                              filter(!is.na(weights)) %>%
+                              filter(t1_gender_g2 == "Male"),
+                            reference = nhanes3_data_8to14 %>% 
+                              filter(!is.na(weights)) %>%
+                              filter(sex == "Male"),
+                            biomarkers = n3_biomarkers_update)
+
+hd_female$data$hd_log_dev <- residuals(lm(hd_log ~ t1_age_g2, data = hd_female$data, na.action = na.exclude))
+hd_male$data$hd_log_dev <- residuals(lm(hd_log ~ t1_age_g2, data = hd_male$data, na.action = na.exclude))
+
+hd_data <- rbind(hd_female$data, hd_male$data) %>% dplyr::select(g2id, hd, hd_log, hd_log_dev)
+
+p50.data <- p50.data %>%
+  left_join(hd_data, by = "g2id")
+
+
+```
+
+# Relationship of KDM and HD with chronological age in NHANES III (8-14 years)
+
+```{r, fig.width=7, fig.height=7}
+kdm_age_plot <- ggplot(nhanes3_data_8to14, aes(x = age, y = kdm, color = sex, fill = sex)) +
+  geom_point(shape = 21, alpha = 0.5) +
+  geom_smooth(method = "lm", formula = y~x) +
+  labs(x = "Chronological age (years)", y = "KDM physiological age (years)") +
+  facet_wrap(~sex) + 
+  scale_color_discrete(guide = "none") +
+  scale_fill_discrete(guide = "none") +
+  theme_bw()
+
+hd_age_plot <- ggplot(nhanes3_data_8to14, aes(x = age, y = hd_log, color = sex, fill = sex)) +
+  geom_point(shape = 21, alpha = 0.5) +
+  geom_smooth(method = "lm", formula = y~x) +
+  labs(x = "Chronological age (years)", y = "Physiological HD (log)") +
+  facet_wrap(~sex) + 
+  scale_color_discrete(guide = "none") +
+  scale_fill_discrete(guide = "none") +
+  theme_bw()
+
+ggarrange(kdm_age_plot, hd_age_plot, nrow = 2, ncol = 1, common.legend = T, labels = "AUTO")
+
+```
+
+# Relationship of KDM and HD with chronological age in CHS (visit 1)
+
+```{r, fig.width=7, fig.height=3.5}
+kdm_age_plot <- ggplot(p50.data, aes(x = t1_age_g2, y = kdm, color = t1_gender_g2, fill = t1_gender_g2)) +
+  geom_point(shape = 21, alpha = 0.5) +
+  geom_smooth(method = "lm", formula = y~x) +
+  labs(x = "Chronological age (years)", y = "KDM physiological age (years)") +
+  scale_color_discrete(name = "Sex") +
+  scale_fill_discrete(name = "Sex") +
+  theme_bw()
+
+hd_age_plot <- ggplot(p50.data, aes(x = t1_age_g2, y = hd_log, color = t1_gender_g2, fill = t1_gender_g2)) +
+  geom_point(shape = 21, alpha = 0.5) +
+  geom_smooth(method = "lm", formula = y~x) +
+  labs(x = "Chronological age (years)", y = "Physiological HD (log)") +
+  scale_color_discrete(name = "Sex") +
+  scale_fill_discrete(name = "Sex") +
+  theme_bw()
+
+ggarrange(kdm_age_plot, hd_age_plot, nrow = 1, ncol = 2, common.legend = T, labels = "AUTO")
+
+correlation::correlation(p50.data, select = "age", select2 = "kdm")
+correlation::correlation(p50.data, select = "age", select2 = "hd")
+```
+
+# Compare the KDM between maltreated and non-maltreated children
+
+## Subset data for modeling
+
+```{r}
+kdm_mod_data <- p50.data %>%
+  dplyr::select(famid, g2id, kdm, kdm_dev, cm_yes, cm_cat_comp_2,
+                t1_age_g2, t1_gender_g2, race, ethnicity,
+                t1_race_g2_recode, t1_eth_g2,
+                t1_income_bracket, t1_ppl_household_recode,
+                t1_bmi_percentile) %>%
+  mutate(race_ethnicity = case_when(t1_eth_g2 == "Non-Hispanic" & t1_race_g2_recode == "White" ~ "Non-Hispanic White",
+                                    t1_eth_g2 == "Non-Hispanic" & t1_race_g2_recode == "Black or African American" ~ "Non-Hispanic Black",
+                                    t1_eth_g2 == "Hispanic" ~ "Hispanic",
+                                    t1_eth_g2 == "Non-Hispanic" & t1_race_g2_recode == "Other" ~ "Other"),
+         race_ethnicity = factor(race_ethnicity, levels = c("Non-Hispanic White", "Non-Hispanic Black", "Hispanic", "Other"))) %>%
+  na.omit()
+```
+
+## Modeling and effect extraction
+
+```{r}
+## binary CM
+kdm_mod_cmbin <- geeglm(kdm_dev ~ cm_yes + t1_gender_g2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                        data = kdm_mod_data, id = famid, corstr = "exchangeable")
+
+summary(kdm_mod_cmbin)
+
+(kdm_mod_cmbin_res <- tidy(kdm_mod_cmbin, conf.int = T))
+
+## specific CM types
+kdm_mod_cmcat <- geeglm(kdm_dev ~ cm_cat_comp_2 + t1_gender_g2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                    data = kdm_mod_data, id = famid, corstr = "exchangeable")
+
+summary(kdm_mod_cmcat)
+(kdm_mod_cmcat_res <- tidy(kdm_mod_cmcat, conf.int = T))
+
+kdm_mod_res <- rbind(kdm_mod_cmbin_res, kdm_mod_cmcat_res) %>%
+  filter(str_detect(term, "cm")) %>%
+  mutate(term = str_remove(term, "(cm_yes|cm_cat_comp_2)"),
+         term = case_when(term == "Yes" ~ "Any maltreatment",
+                          TRUE ~ term))
+
+
+## binary CM by sex
+### female
+kdm_mod_cmbin_female <- geeglm(kdm_dev ~ cm_yes + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                        data = kdm_mod_data %>%
+                          filter(t1_gender_g2 == "Female"), 
+                        id = famid, corstr = "exchangeable")
+
+summary(kdm_mod_cmbin_female)
+
+(kdm_mod_cmbin_female_res <- tidy(kdm_mod_cmbin_female, conf.int = T) %>% mutate(sex = "Female"))
+### male
+kdm_mod_cmbin_male <- geeglm(kdm_dev ~ cm_yes + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                               data = kdm_mod_data %>%
+                                 filter(t1_gender_g2 == "Male"), 
+                               id = famid, corstr = "exchangeable")
+
+summary(kdm_mod_cmbin_male)
+
+(kdm_mod_cmbin_male_res <- tidy(kdm_mod_cmbin_male, conf.int = T) %>% mutate(sex = "Male"))
+
+## specific CM types by sex
+### female
+kdm_mod_cmcat_female <- geeglm(kdm_dev ~ cm_cat_comp_2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                          data = kdm_mod_data %>%
+                            filter(t1_gender_g2 == "Female"), 
+                          id = famid, corstr = "exchangeable")
+
+summary(kdm_mod_cmcat_female)
+(kdm_mod_cmcat_female_res <- tidy(kdm_mod_cmcat_female, conf.int = T) %>% mutate(sex = "Female"))
+
+### male
+kdm_mod_cmcat_male <- geeglm(kdm_dev ~ cm_cat_comp_2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                               data = kdm_mod_data %>%
+                                 filter(t1_gender_g2 == "Male"), 
+                               id = famid, corstr = "exchangeable")
+
+summary(kdm_mod_cmcat_male)
+(kdm_mod_cmcat_male_res <- tidy(kdm_mod_cmcat_male, conf.int = T) %>% mutate(sex = "Male"))
+
+## combine the results
+kdm_mod_bysex_res <- rbind(kdm_mod_cmbin_female_res, kdm_mod_cmbin_male_res,
+                           kdm_mod_cmcat_female_res, kdm_mod_cmcat_male_res) %>%
+  filter(str_detect(term, "cm")) %>%
+  mutate(term = str_remove(term, "(cm_yes|cm_cat_comp_2)"),
+         term = case_when(term == "Yes" ~ "Any maltreatment",
+                          TRUE ~ term))
+
+
+```
+
+## Make a forest plot
+
+```{r, fig.width=6, fig.height=4}
+
+grid.newpage()
+borderWidth <- unit(4, "pt")
+width <- unit(convertX(unit(1, "npc") - 2*borderWidth, unitTo = "npc", valueOnly = TRUE)/2, "npc")
+pushViewport(viewport(layout = grid.layout(nrow = 1, 
+                                           ncol = 3, 
+                                           widths = unit.c(width,
+                                                           borderWidth,
+                                                           width,
+                                                           borderWidth,
+                                                           width))))
+pushViewport(viewport(layout.pos.row = 1,
+                      layout.pos.col = 1))
+kdm_mod_res |>
+  forestplot(#title = "KDM",
+             labeltext = term,
+             mean = estimate,
+             lower = conf.low,
+             upper = conf.high,
+             xlog = F,
+             boxsize = 0.10,
+             line.margin = 0.2,
+             xlab = "Effect size of maltreatment\non KDM physiological age",
+             xticks = c(-0.50, -0.25, 0, 0.25),
+             #xticks = c(-1, -0.5, 0, 0.5, 1.0, 1.5),
+             vertices = T,
+             ci.vertices.height = 0.05,
+             legend_args = fpLegend(pos = list(x = 0.25, y = 0.97,
+                                               "align" = "horizontal"), 
+                                    padding = unit(0, "mm")),
+             new_page = F) |>
+  fp_set_style(box = "black",
+               default = gpar(vertices = TRUE),
+               txt_gp = fpTxtGp(label = gpar(cex = 0.8),
+                                xlab = gpar(cex = 0.6),
+                                ticks = gpar(cex = 0.6),
+                                legend = gpar(cex = 0.8))) |> 
+  fp_set_zebra_style("#F5F9F9") |>
+  print()
+
+upViewport()
+
+pushViewport(viewport(layout.pos.row = 1,
+                      layout.pos.col = 2))
+grid.rect(gp = gpar(fill = "#dddddd", col = "#eeeeee"))
+upViewport()
+
+pushViewport(viewport(layout.pos.row = 1,
+                      layout.pos.col = 3))
+
+kdm_mod_bysex_res |>
+  group_by(sex) |>
+  forestplot(#title = "KDM (by sex)",
+             labeltext = term,
+             mean = estimate,
+             lower = conf.low,
+             upper = conf.high,
+             xlog = F,
+             boxsize = 0.10,
+             line.margin = 0.30,
+             xlab = "Effect size of maltreatment\non KDM physiological age",
+             xticks = c(-0.50, -0.25, 0, 0.25),
+             #xticks = c(-1, -0.5, 0, 0.5, 1.0, 1.5),
+             vertices = T,
+             ci.vertices.height = 0.05,
+             legend_args = fpLegend(pos = list(x = 0, y = 1.00,
+                                               "align" = "horizontal"), 
+                                    padding = unit(0, "mm")),
+             new_page = F) |>
+  fp_set_style(box = c("#DB4424", "#158C68") |> lapply(function(x) gpar(fill = x, col = "#555555")),
+               default = gpar(vertices = TRUE),
+               txt_gp = fpTxtGp(label = gpar(cex = 0.8),
+                                xlab = gpar(cex = 0.6),
+                                ticks = gpar(cex = 0.6),
+                                legend = gpar(cex = 0.8))) |> 
+  fp_set_zebra_style("#F5F9F9") |>
+  print()
+
+upViewport()
+```
+
+# Compare the HD between maltreated and non-maltreated children
+
+## Subset data for modeling
+
+```{r}
+hd_mod_data <- p50.data %>%
+  dplyr::select(famid, g2id, hd_log, hd_log_dev, 
+                cm_yes, cm_cat_comp, cm_cat_comp_2,
+                t1_age_g2, t1_gender_g2, race, ethnicity,
+                t1_race_g2_recode, t1_eth_g2,
+                t1_income_bracket, t1_ppl_household_recode,
+                t1_bmi_percentile) %>%
+   mutate(race_ethnicity = case_when(t1_eth_g2 == "Non-Hispanic" & t1_race_g2_recode == "White" ~ "Non-Hispanic White",
+                                    t1_eth_g2 == "Non-Hispanic" & t1_race_g2_recode == "Black or African American" ~ "Non-Hispanic Black",
+                                    t1_eth_g2 == "Hispanic" ~ "Hispanic",
+                                    t1_eth_g2 == "Non-Hispanic" & t1_race_g2_recode == "Other" ~ "Other"),
+         race_ethnicity = factor(race_ethnicity, levels = c("Non-Hispanic White", "Non-Hispanic Black", "Hispanic", "Other"))) %>%
+  na.omit()
+```
+
+## Modeling and effect extraction
+
+```{r}
+## binary CM
+hd_mod_cmbin <- geeglm(hd_log_dev ~ cm_yes + t1_gender_g2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                        data = hd_mod_data, id = famid, corstr = "exchangeable")
+
+summary(hd_mod_cmbin)
+
+(hd_mod_cmbin_res <- tidy(hd_mod_cmbin, conf.int = T))
+
+## specific CM types
+hd_mod_cmcat <- geeglm(hd_log_dev ~ cm_cat_comp_2 + t1_gender_g2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                        data = hd_mod_data, id = famid, corstr = "exchangeable")
+
+summary(hd_mod_cmcat)
+(hd_mod_cmcat_res <- tidy(hd_mod_cmcat, conf.int = T))
+
+hd_mod_res <- rbind(hd_mod_cmbin_res, hd_mod_cmcat_res) %>%
+  filter(str_detect(term, "cm")) %>%
+  mutate(term = str_remove(term, "(cm_yes|cm_cat_comp_2)"),
+         term = case_when(term == "Yes" ~ "Any maltreatment",
+                          TRUE ~ term))
+
+
+## binary CM by sex
+### female
+hd_mod_cmbin_female <- geeglm(hd_log_dev ~ cm_yes + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                               data = hd_mod_data %>%
+                                 filter(t1_gender_g2 == "Female"), 
+                               id = famid, corstr = "exchangeable")
+
+summary(hd_mod_cmbin_female)
+
+(hd_mod_cmbin_female_res <- tidy(hd_mod_cmbin_female, conf.int = T) %>% mutate(sex = "Female"))
+
+### male
+hd_mod_cmbin_male <- geeglm(hd_log_dev ~ cm_yes + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                             data = hd_mod_data %>%
+                               filter(t1_gender_g2 == "Male"), 
+                             id = famid, corstr = "exchangeable")
+
+summary(hd_mod_cmbin_male)
+
+(hd_mod_cmbin_male_res <- tidy(hd_mod_cmbin_male, conf.int = T) %>% mutate(sex = "Male"))
+
+## specific CM types by sex
+### female
+hd_mod_cmcat_female <- geeglm(hd_log_dev ~ cm_cat_comp_2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                               data = hd_mod_data %>%
+                                 filter(t1_gender_g2 == "Female"), 
+                               id = famid, corstr = "exchangeable")
+
+summary(hd_mod_cmcat_female)
+(hd_mod_cmcat_female_res <- tidy(hd_mod_cmcat_female, conf.int = T) %>% mutate(sex = "Female"))
+
+### male
+hd_mod_cmcat_male <- geeglm(hd_log_dev ~ cm_cat_comp_2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                             data = hd_mod_data %>%
+                               filter(t1_gender_g2 == "Male"), 
+                             id = famid, corstr = "exchangeable")
+
+summary(hd_mod_cmcat_male)
+(hd_mod_cmcat_male_res <- tidy(hd_mod_cmcat_male, conf.int = T) %>% mutate(sex = "Male"))
+
+## combine the results
+hd_mod_bysex_res <- rbind(hd_mod_cmbin_female_res, hd_mod_cmbin_male_res,
+                           hd_mod_cmcat_female_res, hd_mod_cmcat_male_res) %>%
+  filter(str_detect(term, "cm")) %>%
+  mutate(term = str_remove(term, "(cm_yes|cm_cat_comp_2)"),
+         term = case_when(term == "Yes" ~ "Any maltreatment",
+                          TRUE ~ term))
+
+
+```
+
+## Make a forest plot
+
+```{r, fig.width=6, fig.height=4}
+# Make a forest plot 
+grid.newpage()
+borderWidth <- unit(4, "pt")
+width <- unit(convertX(unit(1, "npc") - 2*borderWidth, unitTo = "npc", valueOnly = TRUE)/2, "npc")
+pushViewport(viewport(layout = grid.layout(nrow = 1, 
+                                           ncol = 3, 
+                                           widths = unit.c(width,
+                                                           borderWidth,
+                                                           width,
+                                                           borderWidth,
+                                                           width))))
+pushViewport(viewport(layout.pos.row = 1,
+                      layout.pos.col = 1))
+hd_mod_res |>
+  forestplot(#title = "HD",
+    labeltext = term,
+    mean = estimate,
+    lower = conf.low,
+    upper = conf.high,
+    xlog = F,
+    boxsize = 0.10,
+    line.margin = 0.2,
+    xlab = "Effect size of maltreatment\non physiological HD",
+    #xticks = c(-1, -0.5, 0, 0.5, 1.0, 1.5),
+    xticks = c(-0.5, 0, 0.5, 1.0),
+    vertices = T,
+    ci.vertices.height = 0.05,
+    legend_args = fpLegend(pos = list(x = 0.25, y = 0.97,
+                                      "align" = "horizontal"), 
+                           padding = unit(0, "mm")),
+    new_page = F) |>
+  fp_set_style(box = "black",
+               default = gpar(vertices = TRUE),
+               txt_gp = fpTxtGp(label = gpar(cex = 0.8),
+                                xlab = gpar(cex = 0.6),
+                                ticks = gpar(cex = 0.6),
+                                legend = gpar(cex = 0.8))) |> 
+  fp_set_zebra_style("#F5F9F9") |>
+  print()
+
+upViewport()
+
+pushViewport(viewport(layout.pos.row = 1,
+                      layout.pos.col = 2))
+grid.rect(gp = gpar(fill = "#dddddd", col = "#eeeeee"))
+upViewport()
+
+pushViewport(viewport(layout.pos.row = 1,
+                      layout.pos.col = 3))
+
+hd_mod_bysex_res |>
+  group_by(sex) |>
+  forestplot(#title = "HD (by sex)",
+    labeltext = term,
+    mean = estimate,
+    lower = conf.low,
+    upper = conf.high,
+    xlog = F,
+    boxsize = 0.10,
+    line.margin = 0.30,
+    xlab = "Effect size of maltreatment\non physiological HD",
+    #xticks = c(-1, -0.5, 0, 0.5, 1.0, 1.5),
+    xticks = c(-0.5, 0, 0.5, 1.0),
+    vertices = T,
+    ci.vertices.height = 0.05,
+    legend_args = fpLegend(pos = list(x = 0, y = 1.00,
+                                      "align" = "horizontal"), 
+                           padding = unit(0, "mm")),
+    new_page = F) |>
+  fp_set_style(box = c("#DB4424", "#158C68") |> lapply(function(x) gpar(fill = x, col = "#555555")),
+               default = gpar(vertices = TRUE),
+               txt_gp = fpTxtGp(label = gpar(cex = 0.8),
+                                xlab = gpar(cex = 0.6),
+                                ticks = gpar(cex = 0.6),
+                                legend = gpar(cex = 0.8))) |> 
+  fp_set_zebra_style("#F5F9F9") |>
+  print()
+
+upViewport()
+```
+
+# Extract effects of covariates (CHS Visit 1)
+
+```{r, fig.width=7, fig.height=7}
+kdm_mod_cmbin <- geeglm(kdm_dev ~ cm_yes + t1_gender_g2 + race_ethnicity + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                        data = kdm_mod_data, id = famid, corstr = "exchangeable")
+summary(kdm_mod_cmbin)
+tidy(kdm_mod_cmbin, conf.int = T)
+kdm_mod_cmbin_female <- geeglm(kdm_dev ~ cm_yes + race_ethnicity + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                        data = kdm_mod_data %>% filter(t1_gender_g2 == "Female"), 
+                        id = famid, corstr = "exchangeable")
+
+kdm_mod_cmbin_male <- geeglm(kdm_dev ~ cm_yes + race_ethnicity + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                        data = kdm_mod_data %>% filter(t1_gender_g2 == "Male"), 
+                        id = famid, corstr = "exchangeable")
+
+hd_mod_cmbin <- geeglm(hd_log_dev ~ cm_yes + t1_gender_g2 + race_ethnicity + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                        data = hd_mod_data, id = famid, corstr = "exchangeable")
+tidy(hd_mod_cmbin, conf.int = T)
+
+hd_mod_cmbin_female <- geeglm(hd_log_dev ~ cm_yes + race_ethnicity + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                        data = hd_mod_data %>% filter(t1_gender_g2 == "Female"), 
+                       id = famid, corstr = "exchangeable")
+
+hd_mod_cmbin_male <- geeglm(hd_log_dev ~ cm_yes + race_ethnicity + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                        data = hd_mod_data %>% filter(t1_gender_g2 == "Male"), 
+                       id = famid, corstr = "exchangeable")
+
+jtools::plot_summs(`KDM` = kdm_mod_cmbin,
+                   `HD` = hd_mod_cmbin,
+                   legend.title = "",
+                   coefs = c("NH Black vs. NH White" = "race_ethnicityNon-Hispanic Black",
+                             "Hispanic vs. NH White" = "race_ethnicityHispanic",
+                             "Other race vs. NH White" = "race_ethnicityOther",
+                             "Income\n($40,000-$79,999 vs.$0-$39,999)" = "t1_income_bracket$40,000-$79,999",
+                             "Income\n($80,000 or above vs. $0-$39,999)" = "t1_income_bracket$80,000 or above",
+                             "N of people in household\n(4-6 vs. 1-3)" = "t1_ppl_household_recode4-6 people",
+                             "N of people in household\n(7 or more vs. 1-3)" = "t1_ppl_household_recode7 or more people"))
+
+jtools::plot_summs(`KDM (female)` = kdm_mod_cmbin_female,
+                   `KDM (male)` = kdm_mod_cmbin_male,
+                   `HD (female)` = hd_mod_cmbin_female,
+                   `HD (male)` = hd_mod_cmbin_male,
+                   legend.title = "",
+                   coefs = c("NH Black vs. NH White" = "race_ethnicityNon-Hispanic Black",
+                             "Hispanic vs. NH White" = "race_ethnicityHispanic",
+                             "Other race vs. NH White" = "race_ethnicityOther",
+                             "Income\n($40,000-$79,999 vs.$0-$39,999)" = "t1_income_bracket$40,000-$79,999",
+                             "Income\n($80,000 or above vs. $0-$39,999)" = "t1_income_bracket$80,000 or above",
+                             "N of people in household\n(4-6 vs. 1-3)" = "t1_ppl_household_recode4-6 people",
+                             "N of people in household\n(7 or more vs. 1-3)" = "t1_ppl_household_recode7 or more people"))
+
+```
+
+# Exploratory analyses - MCS variables
+
+## Descriptive statistics
+
+```{r}
+mcs_desc_1 <- crosstable(p50.data %>% filter(!is.na(kdm)|!is.na(hd_log)), cols = c("mcs_cm_n_all_cat_pa", "mcs_cm_n_all_cat_sa", "mcs_cm_n_all_cat_ftp", "mcs_cm_n_all_cat_los", "mcs_cm_n_all_cat_em", "mcs_cm_n_all_cat_ml", "mcs_cm_n_all_cat_edu", "mcs_cm_year_since_cat_pa", "mcs_cm_year_since_cat_sa", "mcs_cm_year_since_cat_ftp", "mcs_cm_year_since_cat_los", "mcs_cm_year_since_cat_em", "mcs_cm_year_since_cat_ml", "mcs_cm_year_since_cat_edu", "mcs_cm_sev_highest_pa", "mcs_cm_sev_highest_sa", "mcs_cm_sev_highest_ftp", "mcs_cm_sev_highest_los", "mcs_cm_sev_highest_em", "mcs_cm_sev_highest_ml", "mcs_cm_sev_highest_edu"),
+          percent_pattern = "{n} ({p_col})",
+           test = T,
+           funs = c(`Mean (SD)` = meansd,
+                    `Min / Max` = minmax,
+                    `N (NA)` = nna))
+
+# By sex
+mcs_desc_2 <- crosstable(p50.data %>% filter(!is.na(kdm)|!is.na(hd_log)), cols = c("mcs_cm_n_all_cat_pa", "mcs_cm_n_all_cat_sa", "mcs_cm_n_all_cat_ftp", "mcs_cm_n_all_cat_los", "mcs_cm_n_all_cat_em", "mcs_cm_n_all_cat_ml", "mcs_cm_n_all_cat_edu", "mcs_cm_year_since_cat_pa", "mcs_cm_year_since_cat_sa", "mcs_cm_year_since_cat_ftp", "mcs_cm_year_since_cat_los", "mcs_cm_year_since_cat_em", "mcs_cm_year_since_cat_ml", "mcs_cm_year_since_cat_edu", "mcs_cm_sev_highest_pa", "mcs_cm_sev_highest_sa", "mcs_cm_sev_highest_ftp", "mcs_cm_sev_highest_los", "mcs_cm_sev_highest_em", "mcs_cm_sev_highest_ml", "mcs_cm_sev_highest_edu"),
+           by = "t1_gender_g2", percent_pattern = "{n} ({p_col})",
+           test = T,
+           funs = c(`Mean (SD)` = meansd,
+                    `Min / Max` = minmax,
+                    `N (NA)` = nna))
+
+# combine th results
+mcs_desc_res <- cbind(mcs_desc_1, mcs_desc_2)
+```
+
+## Make a function for plotting
+
+```{r}
+mcs_plot <- function(tidy_model_result, dv_group_var = "dv_group", mcs_var_label = "Maltreatment frequency", mcs_level = c("1", "2 or more"), mcs_label = c("1 vs. 0", "2 or more vs. 0"), mcs_color = c("#ff7b01", "#0d00ff")) {
+  plot_data <- tidy_model_result %>%
+    filter(str_detect(term, "mcs")) %>%
+    mutate(cm = str_extract(term, "(pa|sa|ftp|los|em|ml|edu)"),
+           cm = factor(cm, levels = c("pa", "sa", "ftp", "los", "em", "ml", "edu"),
+                       labels = c("Physical abuse", "Sexual abuse", "Failure to provide", "Lack of supervision", "Emotional maltreatment", "Moral/Legal maltreatment", "Educational maltreatment")),
+           level = str_extract(term, paste0("(", paste0(mcs_level, collapse = "|"), ")")),
+           level = factor(level, levels = mcs_level, labels = mcs_label))
+  
+  plot <- ggplot(plot_data, aes(y = fct_rev(cm), group = fct_rev(level), color = fct_rev(level))) +
+    geom_vline(aes(xintercept = 0), linetype = "dashed", color = "black") +
+    geom_point(aes(x = estimate), position = position_dodge2(width = 0.3)) +
+    geom_errorbar(aes(xmin = conf.low, xmax = conf.high), position = position_dodge2(width = 0.3), width = 0.3) +
+    labs(x = "Effect size", y = "") +
+    scale_color_manual(name = mcs_var_label, values = mcs_color) +
+    guides(color = guide_legend(reverse = T)) +
+    facet_wrap(as.formula(paste0("~",dv_group_var)), scales = "free_x") +
+    theme_bw() +
+    theme(legend.position = "top", legend.direction = "vertical")
+  
+  return(plot)
+}
+```
+
+## MCS frequency
+
+### Subset data for modeling
+
+```{r}
+mcs_mod_data <- p50.data %>%
+  dplyr::select(famid, g2id, kdm, kdm_dev, hd_log, hd_log_dev, 
+                cm_yes, cm_cat_comp_2, mcs_cm_n_all_any_cat,
+                mcs_cm_n_all_cat_pa, mcs_cm_n_all_cat_sa, mcs_cm_n_all_cat_ftp,
+                mcs_cm_n_all_cat_los, mcs_cm_n_all_cat_em, mcs_cm_n_all_cat_ml, mcs_cm_n_all_cat_edu,
+                t1_age_g2, t1_gender_g2, race, ethnicity,
+                t1_race_g2_recode, t1_eth_g2,
+                t1_income_bracket, t1_ppl_household_recode,
+                t1_bmi_percentile) %>%
+  na.omit()
+```
+
+### Modeling and effect extraction
+
+#### KDM
+
+```{r}
+kdm_mod_mcsn <- geeglm(kdm_dev ~ mcs_cm_n_all_cat_pa + mcs_cm_n_all_cat_sa + mcs_cm_n_all_cat_ftp + mcs_cm_n_all_cat_los + mcs_cm_n_all_cat_em + mcs_cm_n_all_cat_ml + mcs_cm_n_all_cat_edu + t1_gender_g2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                    data = mcs_mod_data, id = famid, corstr = "exchangeable")
+
+summary(kdm_mod_mcsn)
+(kdm_mod_mcsn_res <- tidy(kdm_mod_mcsn, conf.int = T) %>% mutate(dv_group = "KDM"))
+
+```
+
+#### HD
+
+```{r}
+hd_mod_mcsn <- geeglm(hd_log_dev ~ mcs_cm_n_all_cat_pa + mcs_cm_n_all_cat_sa + mcs_cm_n_all_cat_ftp + mcs_cm_n_all_cat_los + mcs_cm_n_all_cat_em + mcs_cm_n_all_cat_ml + mcs_cm_n_all_cat_edu + t1_gender_g2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                    data = mcs_mod_data, id = famid, corstr = "exchangeable")
+
+summary(hd_mod_mcsn)
+(hd_mod_mcsn_res <- tidy(hd_mod_mcsn, conf.int = T) %>% mutate(dv_group = "HD"))
+
+```
+
+#### Combine the results and make plots
+
+```{r}
+mod_mcsn_res <- rbind(kdm_mod_mcsn_res, hd_mod_mcsn_res) %>%
+  mutate(dv_group = factor(dv_group, levels = c("KDM", "HD")))
+
+mcsn_p <- mcs_plot(mod_mcsn_res)
+```
+
+## MCS chronicity
+
+### Subset data for modeling
+
+```{r}
+mcs_mod_data <- p50.data %>%
+  dplyr::select(famid, g2id, kdm, kdm_dev, hd_log, hd_log_dev, 
+                cm_yes, cm_cat_comp_2, mcs_cm_year_since_any_cat,
+                mcs_cm_year_since_cat_pa, mcs_cm_year_since_cat_sa, mcs_cm_year_since_cat_ftp,
+                mcs_cm_year_since_cat_los, mcs_cm_year_since_cat_em, mcs_cm_year_since_cat_ml, mcs_cm_year_since_cat_edu,
+                t1_age_g2, t1_gender_g2, race, ethnicity,
+                t1_race_g2_recode, t1_eth_g2,
+                t1_income_bracket, t1_ppl_household_recode,
+                t1_bmi_percentile) %>%
+  na.omit()
+```
+
+### Modeling and effect extraction
+
+#### KDM
+
+```{r}
+kdm_mod_mcsyears <- geeglm(kdm_dev ~ mcs_cm_year_since_cat_pa + mcs_cm_year_since_cat_sa + mcs_cm_year_since_cat_ftp + mcs_cm_year_since_cat_los + mcs_cm_year_since_cat_em + mcs_cm_year_since_cat_ml + mcs_cm_year_since_cat_edu + t1_gender_g2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                    data = mcs_mod_data, id = famid, corstr = "exchangeable")
+
+summary(kdm_mod_mcsyears)
+(kdm_mod_mcsyears_res <- tidy(kdm_mod_mcsyears, conf.int = T) %>% mutate(dv_group = "KDM"))
+
+```
+
+#### HD
+
+```{r}
+hd_mod_mcsyears <- geeglm(hd_log_dev ~ mcs_cm_year_since_cat_pa + mcs_cm_year_since_cat_sa + mcs_cm_year_since_cat_ftp + mcs_cm_year_since_cat_los + mcs_cm_year_since_cat_em + mcs_cm_year_since_cat_ml + mcs_cm_year_since_cat_edu + t1_gender_g2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                    data = mcs_mod_data, id = famid, corstr = "exchangeable")
+
+summary(hd_mod_mcsyears)
+(hd_mod_mcsyears_res <- tidy(hd_mod_mcsyears, conf.int = T) %>% mutate(dv_group = "HD"))
+
+```
+
+#### Combine the results and make plots
+
+```{r}
+mod_mcsyears_res <- rbind(kdm_mod_mcsyears_res, hd_mod_mcsyears_res) %>%
+  mutate(dv_group = factor(dv_group, levels = c("KDM", "HD")))
+
+mcsyears_p <- mcs_plot(mod_mcsyears_res, mcs_var_label = "Years since first report", mcs_level = c(">0 to <2 years", "2 years and longer"), mcs_label = c(">0 to <2 years vs. No exposure", "2 years or longer vs. No exposure"), mcs_color = c("#ac06c6", "#057eb3"))
+```
+
+## Combine the plots
+
+```{r, fig.width=6, fig.height=9}
+ggarrange(mcsn_p, mcsyears_p,
+          ncol = 1, nrow = 2, labels = "AUTO")
+```
+
+# Sensitivity analyses - controlling for Tanner stage
+
+## Compare the KDM between maltreated and non-maltreated children
+
+### Subset data for modeling
+
+```{r}
+kdm_mod_data <- p50.data %>%
+  dplyr::select(famid, g2id, kdm, kdm_dev, cm_yes, cm_cat_comp_2,
+                t1_age_g2, t1_gender_g2, race, ethnicity,
+                t1_race_g2_recode, t1_eth_g2,
+                t1_income_bracket, t1_ppl_household_recode,
+                t1_bmi_percentile, t1_tanner_average) %>%
+  na.omit()
+```
+
+### Modeling and effect extraction
+
+```{r}
+## binary CM
+kdm_mod_cmbin <- geeglm(kdm_dev ~ cm_yes + t1_gender_g2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile + t1_tanner_average,
+                        data = kdm_mod_data, id = famid, corstr = "exchangeable")
+
+summary(kdm_mod_cmbin)
+
+(kdm_mod_cmbin_res <- tidy(kdm_mod_cmbin, conf.int = T))
+
+## specific CM types
+kdm_mod_cmcat <- geeglm(kdm_dev ~ cm_cat_comp_2 + t1_gender_g2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile + t1_tanner_average,
+                    data = kdm_mod_data, id = famid, corstr = "exchangeable")
+
+summary(kdm_mod_cmcat)
+(kdm_mod_cmcat_res <- tidy(kdm_mod_cmcat, conf.int = T))
+
+kdm_mod_res <- rbind(kdm_mod_cmbin_res, kdm_mod_cmcat_res) %>%
+  filter(str_detect(term, "cm")) %>%
+  mutate(term = str_remove(term, "(cm_yes|cm_cat_comp_2)"),
+         term = case_when(term == "Yes" ~ "Any maltreatment",
+                          TRUE ~ term))
+
+
+## binary CM by sex
+### female
+kdm_mod_cmbin_female <- geeglm(kdm_dev ~ cm_yes + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile + t1_tanner_average,
+                        data = kdm_mod_data %>%
+                          filter(t1_gender_g2 == "Female"), 
+                        id = famid, corstr = "exchangeable")
+
+summary(kdm_mod_cmbin_female)
+
+(kdm_mod_cmbin_female_res <- tidy(kdm_mod_cmbin_female, conf.int = T) %>% mutate(sex = "Female"))
+### male
+kdm_mod_cmbin_male <- geeglm(kdm_dev ~ cm_yes + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile + t1_tanner_average,
+                               data = kdm_mod_data %>%
+                                 filter(t1_gender_g2 == "Male"), 
+                               id = famid, corstr = "exchangeable")
+
+summary(kdm_mod_cmbin_male)
+
+(kdm_mod_cmbin_male_res <- tidy(kdm_mod_cmbin_male, conf.int = T) %>% mutate(sex = "Male"))
+
+## specific CM types by sex
+### female
+kdm_mod_cmcat_female <- geeglm(kdm_dev ~ cm_cat_comp_2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile + t1_tanner_average,
+                          data = kdm_mod_data %>%
+                            filter(t1_gender_g2 == "Female"), 
+                          id = famid, corstr = "exchangeable")
+
+summary(kdm_mod_cmcat_female)
+(kdm_mod_cmcat_female_res <- tidy(kdm_mod_cmcat_female, conf.int = T) %>% mutate(sex = "Female"))
+
+### male
+kdm_mod_cmcat_male <- geeglm(kdm_dev ~ cm_cat_comp_2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile + t1_tanner_average,
+                               data = kdm_mod_data %>%
+                                 filter(t1_gender_g2 == "Male"), 
+                               id = famid, corstr = "exchangeable")
+
+summary(kdm_mod_cmcat_male)
+(kdm_mod_cmcat_male_res <- tidy(kdm_mod_cmcat_male, conf.int = T) %>% mutate(sex = "Male"))
+
+## combine the results
+kdm_mod_bysex_res <- rbind(kdm_mod_cmbin_female_res, kdm_mod_cmbin_male_res,
+                           kdm_mod_cmcat_female_res, kdm_mod_cmcat_male_res) %>%
+  filter(str_detect(term, "cm")) %>%
+  mutate(term = str_remove(term, "(cm_yes|cm_cat_comp_2)"),
+         term = case_when(term == "Yes" ~ "Any maltreatment",
+                          TRUE ~ term))
+
+```
+
+### Make a forest plot
+
+```{r, ,fig.height=4, fig.width=6}
+
+grid.newpage()
+borderWidth <- unit(4, "pt")
+width <- unit(convertX(unit(1, "npc") - 2*borderWidth, unitTo = "npc", valueOnly = TRUE)/2, "npc")
+pushViewport(viewport(layout = grid.layout(nrow = 1, 
+                                           ncol = 3, 
+                                           widths = unit.c(width,
+                                                           borderWidth,
+                                                           width,
+                                                           borderWidth,
+                                                           width))))
+pushViewport(viewport(layout.pos.row = 1,
+                      layout.pos.col = 1))
+kdm_mod_res |>
+  forestplot(#title = "KDM",
+             labeltext = term,
+             mean = estimate,
+             lower = conf.low,
+             upper = conf.high,
+             xlog = F,
+             boxsize = 0.10,
+             line.margin = 0.2,
+             xlab = "Effect size of maltreatment\non KDM physiological age",
+             xticks = c(-0.50, -0.25, 0, 0.25),
+             #xticks = c(-1, -0.5, 0, 0.5, 1.0, 1.5),
+             vertices = T,
+             ci.vertices.height = 0.05,
+             legend_args = fpLegend(pos = list(x = 0.25, y = 0.97,
+                                               "align" = "horizontal"), 
+                                    padding = unit(0, "mm")),
+             new_page = F) |>
+  fp_set_style(box = "black",
+               default = gpar(vertices = TRUE),
+               txt_gp = fpTxtGp(label = gpar(cex = 0.8),
+                                xlab = gpar(cex = 0.6),
+                                ticks = gpar(cex = 0.6),
+                                legend = gpar(cex = 0.8))) |> 
+  fp_set_zebra_style("#F5F9F9") |>
+  print()
+
+upViewport()
+
+pushViewport(viewport(layout.pos.row = 1,
+                      layout.pos.col = 2))
+grid.rect(gp = gpar(fill = "#dddddd", col = "#eeeeee"))
+upViewport()
+
+pushViewport(viewport(layout.pos.row = 1,
+                      layout.pos.col = 3))
+
+kdm_mod_bysex_res |>
+  group_by(sex) |>
+  forestplot(#title = "KDM (by sex)",
+             labeltext = term,
+             mean = estimate,
+             lower = conf.low,
+             upper = conf.high,
+             xlog = F,
+             boxsize = 0.10,
+             line.margin = 0.30,
+             xlab = "Effect size of maltreatment\non KDM physiological age",
+             xticks = c(-0.50, -0.25, 0, 0.25),
+             #xticks = c(-1, -0.5, 0, 0.5, 1.0, 1.5),
+             vertices = T,
+             ci.vertices.height = 0.05,
+             legend_args = fpLegend(pos = list(x = 0, y = 1.00,
+                                               "align" = "horizontal"), 
+                                    padding = unit(0, "mm")),
+             new_page = F) |>
+  fp_set_style(box = c("#DB4424", "#158C68") |> lapply(function(x) gpar(fill = x, col = "#555555")),
+               default = gpar(vertices = TRUE),
+               txt_gp = fpTxtGp(label = gpar(cex = 0.8),
+                                xlab = gpar(cex = 0.6),
+                                ticks = gpar(cex = 0.6),
+                                legend = gpar(cex = 0.8))) |> 
+  fp_set_zebra_style("#F5F9F9") |>
+  print()
+
+upViewport()
+
+```
+
+## Compare the HD between maltreated and non-maltreated children
+
+### Subset data for modeling
+
+```{r}
+hd_mod_data <- p50.data %>%
+  dplyr::select(famid, g2id, hd_log, hd_log_dev, 
+                cm_yes, cm_cat_comp, cm_cat_comp_2,
+                t1_age_g2, t1_gender_g2, race, ethnicity,
+                t1_race_g2_recode, t1_eth_g2,
+                t1_income_bracket, t1_ppl_household_recode,
+                t1_bmi_percentile, t1_tanner_average) %>%
+  na.omit()
+```
+
+## Modeling and effect extraction
+
+```{r}
+## binary CM
+hd_mod_cmbin <- geeglm(hd_log_dev ~ cm_yes + t1_gender_g2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile + t1_tanner_average,
+                        data = hd_mod_data, id = famid, corstr = "exchangeable")
+
+summary(hd_mod_cmbin)
+
+(hd_mod_cmbin_res <- tidy(hd_mod_cmbin, conf.int = T))
+
+## specific CM types
+hd_mod_cmcat <- geeglm(hd_log_dev ~ cm_cat_comp_2 + t1_gender_g2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile + t1_tanner_average,
+                        data = hd_mod_data, id = famid, corstr = "exchangeable")
+
+summary(hd_mod_cmcat)
+(hd_mod_cmcat_res <- tidy(hd_mod_cmcat, conf.int = T))
+
+hd_mod_res <- rbind(hd_mod_cmbin_res, hd_mod_cmcat_res) %>%
+  filter(str_detect(term, "cm")) %>%
+  mutate(term = str_remove(term, "(cm_yes|cm_cat_comp_2)"),
+         term = case_when(term == "Yes" ~ "Any maltreatment",
+                          TRUE ~ term))
+
+
+## binary CM by sex
+### female
+hd_mod_cmbin_female <- geeglm(hd_log_dev ~ cm_yes + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile + t1_tanner_average,
+                               data = hd_mod_data %>%
+                                 filter(t1_gender_g2 == "Female"), 
+                               id = famid, corstr = "exchangeable")
+
+summary(hd_mod_cmbin_female)
+
+(hd_mod_cmbin_female_res <- tidy(hd_mod_cmbin_female, conf.int = T) %>% mutate(sex = "Female"))
+
+### male
+hd_mod_cmbin_male <- geeglm(hd_log_dev ~ cm_yes + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile + t1_tanner_average,
+                             data = hd_mod_data %>%
+                               filter(t1_gender_g2 == "Male"), 
+                             id = famid, corstr = "exchangeable")
+
+summary(hd_mod_cmbin_male)
+
+(hd_mod_cmbin_male_res <- tidy(hd_mod_cmbin_male, conf.int = T) %>% mutate(sex = "Male"))
+
+## specific CM types by sex
+### female
+hd_mod_cmcat_female <- geeglm(hd_log_dev ~ cm_cat_comp_2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile + t1_tanner_average,
+                               data = hd_mod_data %>%
+                                 filter(t1_gender_g2 == "Female"), 
+                               id = famid, corstr = "exchangeable")
+
+summary(hd_mod_cmcat_female)
+(hd_mod_cmcat_female_res <- tidy(hd_mod_cmcat_female, conf.int = T) %>% mutate(sex = "Female"))
+
+### male
+hd_mod_cmcat_male <- geeglm(hd_log_dev ~ cm_cat_comp_2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile + t1_tanner_average,
+                             data = hd_mod_data %>%
+                               filter(t1_gender_g2 == "Male"), 
+                             id = famid, corstr = "exchangeable")
+
+summary(hd_mod_cmcat_male)
+(hd_mod_cmcat_male_res <- tidy(hd_mod_cmcat_male, conf.int = T) %>% mutate(sex = "Male"))
+
+## combine the results
+hd_mod_bysex_res <- rbind(hd_mod_cmbin_female_res, hd_mod_cmbin_male_res,
+                           hd_mod_cmcat_female_res, hd_mod_cmcat_male_res) %>%
+  filter(str_detect(term, "cm")) %>%
+  mutate(term = str_remove(term, "(cm_yes|cm_cat_comp_2)"),
+         term = case_when(term == "Yes" ~ "Any maltreatment",
+                          TRUE ~ term))
+
+
+```
+
+## Make a forest plot
+
+```{r, fig.width=6, fig.height=4}
+# Make a forest plot 
+grid.newpage()
+borderWidth <- unit(4, "pt")
+width <- unit(convertX(unit(1, "npc") - 2*borderWidth, unitTo = "npc", valueOnly = TRUE)/2, "npc")
+pushViewport(viewport(layout = grid.layout(nrow = 1, 
+                                           ncol = 3, 
+                                           widths = unit.c(width,
+                                                           borderWidth,
+                                                           width,
+                                                           borderWidth,
+                                                           width))))
+pushViewport(viewport(layout.pos.row = 1,
+                      layout.pos.col = 1))
+hd_mod_res |>
+  forestplot(#title = "HD",
+    labeltext = term,
+    mean = estimate,
+    lower = conf.low,
+    upper = conf.high,
+    xlog = F,
+    boxsize = 0.10,
+    line.margin = 0.2,
+    xlab = "Effect size of maltreatment\non physiological HD",
+    #xticks = c(-1, -0.5, 0, 0.5, 1.0, 1.5),
+    xticks = c(-0.5, 0, 0.5, 1.0),
+    vertices = T,
+    ci.vertices.height = 0.05,
+    legend_args = fpLegend(pos = list(x = 0.25, y = 0.97,
+                                      "align" = "horizontal"), 
+                           padding = unit(0, "mm")),
+    new_page = F) |>
+  fp_set_style(box = "black",
+               default = gpar(vertices = TRUE),
+               txt_gp = fpTxtGp(label = gpar(cex = 0.8),
+                                xlab = gpar(cex = 0.6),
+                                ticks = gpar(cex = 0.6),
+                                legend = gpar(cex = 0.8))) |> 
+  fp_set_zebra_style("#F5F9F9") |>
+  print()
+
+upViewport()
+
+pushViewport(viewport(layout.pos.row = 1,
+                      layout.pos.col = 2))
+grid.rect(gp = gpar(fill = "#dddddd", col = "#eeeeee"))
+upViewport()
+
+pushViewport(viewport(layout.pos.row = 1,
+                      layout.pos.col = 3))
+
+hd_mod_bysex_res |>
+  group_by(sex) |>
+  forestplot(#title = "HD (by sex)",
+    labeltext = term,
+    mean = estimate,
+    lower = conf.low,
+    upper = conf.high,
+    xlog = F,
+    boxsize = 0.10,
+    line.margin = 0.30,
+    xlab = "Effect size of maltreatment\non physiological HD",
+    #xticks = c(-1, -0.5, 0, 0.5, 1.0, 1.5),
+    xticks = c(-0.5, 0, 0.5, 1.0),
+    vertices = T,
+    ci.vertices.height = 0.05,
+    legend_args = fpLegend(pos = list(x = 0, y = 1.00,
+                                      "align" = "horizontal"), 
+                           padding = unit(0, "mm")),
+    new_page = F) |>
+  fp_set_style(box = c("#DB4424", "#158C68") |> lapply(function(x) gpar(fill = x, col = "#555555")),
+               default = gpar(vertices = TRUE),
+               txt_gp = fpTxtGp(label = gpar(cex = 0.8),
+                                xlab = gpar(cex = 0.6),
+                                ticks = gpar(cex = 0.6),
+                                legend = gpar(cex = 0.8))) |> 
+  fp_set_zebra_style("#F5F9F9") |>
+  print()
+
+upViewport()
+```
+
+# Correlation between KDM and Tanner stage
+
+```{r}
+correlation::correlation(data = p50.data, select = "kdm_dev", select2 = "t1_tanner_average")
+correlation::correlation(data = p50.data, select = "hd_log_dev", select2 = "t1_tanner_average")
+```
+
+# Make a function to iterate the whole process
+
+```{r, fig.width=5, fig.height=6}
+process <- function(biomarkers = n3_biomarkers_update,
+                    reference_data = nhanes3_data_8to14,
+                    analytical_data = p50.data){
+  
+  var_to_remove <- c("kdm", "kdm_dev", "hd", "hd_log", "hd_log_dev")
+  var_in_data <- var_to_remove %in% colnames(analytical_data)
+  if(any(var_in_data)){
+    analytical_data <- analytical_data %>%
+      dplyr::select(-all_of(var_to_remove[var_in_data]))
+  }
+  
+  # KDM calculation #
+  kdm_ref_female <- kdm_calc_update_2(data = reference_data %>% 
+                                        filter(!is.na(weights)) %>%
+                                        filter(sex == "Female"),
+                                    biomarkers = biomarkers)
+  
+  kdm_ref_male <- kdm_calc_update_2(data = reference_data %>% 
+                                      filter(!is.na(weights)) %>%
+                                      filter(sex == "Male"),
+                                  biomarkers = biomarkers)
+  
+  kdm_female <- kdm_calc_update(data = analytical_data %>%
+                                  filter(t1_gender_g2 == "Female"),
+                                biomarkers = biomarkers,
+                                fit = kdm_ref_female$fit,
+                                s_ba2 = kdm_ref_female$fit$s_ba2)
+  
+  kdm_male <- kdm_calc_update(data = analytical_data %>%
+                                filter(t1_gender_g2 == "Male"),
+                              biomarkers = biomarkers,
+                              fit = kdm_ref_male$fit,
+                              s_ba2 = kdm_ref_male$fit$s_ba2)
+  kdm_female$data$kdm_dev <- residuals(lm(kdm ~ t1_age_g2, data = kdm_female$data, na.action = na.exclude))
+  kdm_male$data$kdm_dev <- residuals(lm(kdm ~ t1_age_g2, data = kdm_male$data, na.action = na.exclude))
+  kdm_data <- rbind(kdm_female$data, kdm_male$data) %>% dplyr::select(g2id, kdm, kdm_dev)
+  
+  analytical_data <- analytical_data %>%
+    left_join(kdm_data, by = "g2id")
+  
+  # HD calculation #
+  hd_female <- hd_calc_update_2(data = analytical_data %>%
+                         filter(t1_gender_g2 == "Female"),
+                       reference = reference_data %>% 
+                         filter(!is.na(weights)) %>%
+                         filter(sex == "Female"),
+                       biomarkers = biomarkers)
+  
+  hd_male <- hd_calc_update_2(data = analytical_data %>%
+                       filter(t1_gender_g2 == "Male"),
+                     reference = reference_data %>% 
+                       filter(!is.na(weights)) %>%
+                       filter(sex == "Male"),
+                     biomarkers = biomarkers)
+  
+  hd_female$data$hd_log_dev <- residuals(lm(hd_log ~ t1_age_g2, data = hd_female$data, na.action = na.exclude))
+  hd_male$data$hd_log_dev <- residuals(lm(hd_log ~ t1_age_g2, data = hd_male$data, na.action = na.exclude))
+
+  hd_data <- rbind(hd_female$data, hd_male$data) %>% dplyr::select(g2id, hd, hd_log, hd_log_dev)
+  
+  analytical_data <- analytical_data %>%
+    left_join(hd_data, by = "g2id")
+  
+  # Compare the KDM between maltreated and non-maltreated children #
+  kdm_mod_data <- analytical_data %>%
+    dplyr::select(famid, g2id, kdm_dev, cm_yes, cm_cat_comp_2,
+                  t1_age_g2, t1_gender_g2,
+                  t1_race_g2_recode, t1_eth_g2,
+                  t1_income_bracket, t1_ppl_household_recode,
+                  t1_bmi_percentile) %>%
+    na.omit()
+  ## binary CM
+  kdm_mod_cmbin <- geeglm(kdm_dev ~ cm_yes + t1_gender_g2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                          data = kdm_mod_data, id = famid, corstr = "exchangeable")
+  
+  summary(kdm_mod_cmbin)
+  
+  (kdm_mod_cmbin_res <- tidy(kdm_mod_cmbin, conf.int = T))
+  
+  ## specific CM types
+  kdm_mod_cmcat <- geeglm(kdm_dev ~ cm_cat_comp_2 + t1_gender_g2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                          data = kdm_mod_data, id = famid, corstr = "exchangeable")
+  
+  summary(kdm_mod_cmcat)
+  (kdm_mod_cmcat_res <- tidy(kdm_mod_cmcat, conf.int = T))
+  
+  kdm_mod_res <- rbind(kdm_mod_cmbin_res, kdm_mod_cmcat_res) %>%
+    filter(str_detect(term, "cm")) %>%
+    mutate(term = str_remove(term, "(cm_yes|cm_cat_comp_2)"),
+           term = case_when(term == "Yes" ~ "Any maltreatment",
+                            TRUE ~ term)) %>%
+    mutate(sex = "Both",
+           ba = "kdm")
+  
+  
+  ## binary CM by sex
+  ### female
+  kdm_mod_cmbin_female <- geeglm(kdm_dev ~ cm_yes + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                                 data = kdm_mod_data %>%
+                                   filter(t1_gender_g2 == "Female"), 
+                                 id = famid, corstr = "exchangeable")
+  
+  summary(kdm_mod_cmbin_female)
+  
+  (kdm_mod_cmbin_female_res <- tidy(kdm_mod_cmbin_female, conf.int = T) %>% mutate(sex = "Female"))
+  ### male
+  kdm_mod_cmbin_male <- geeglm(kdm_dev ~ cm_yes + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                               data = kdm_mod_data %>%
+                                 filter(t1_gender_g2 == "Male"), 
+                               id = famid, corstr = "exchangeable")
+  
+  summary(kdm_mod_cmbin_male)
+  
+  (kdm_mod_cmbin_male_res <- tidy(kdm_mod_cmbin_male, conf.int = T) %>% mutate(sex = "Male"))
+  
+  ## specific CM types by sex
+  ### female
+  kdm_mod_cmcat_female <- geeglm(kdm_dev ~ cm_cat_comp_2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                                 data = kdm_mod_data %>%
+                                   filter(t1_gender_g2 == "Female"), 
+                                 id = famid, corstr = "exchangeable")
+  
+  summary(kdm_mod_cmcat_female)
+  (kdm_mod_cmcat_female_res <- tidy(kdm_mod_cmcat_female, conf.int = T) %>% mutate(sex = "Female"))
+  
+  ### male
+  kdm_mod_cmcat_male <- geeglm(kdm_dev ~ cm_cat_comp_2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                               data = kdm_mod_data %>%
+                                 filter(t1_gender_g2 == "Male"), 
+                               id = famid, corstr = "exchangeable")
+  
+  summary(kdm_mod_cmcat_male)
+  (kdm_mod_cmcat_male_res <- tidy(kdm_mod_cmcat_male, conf.int = T) %>% mutate(sex = "Male"))
+  
+  ## combine the results
+  kdm_mod_bysex_res <- rbind(kdm_mod_cmbin_female_res, kdm_mod_cmbin_male_res,
+                             kdm_mod_cmcat_female_res, kdm_mod_cmcat_male_res) %>%
+    filter(str_detect(term, "cm")) %>%
+    mutate(term = str_remove(term, "(cm_yes|cm_cat_comp_2)"),
+           term = case_when(term == "Yes" ~ "Any maltreatment",
+                            TRUE ~ term)) %>%
+    mutate(ba = "kdm")
+  
+  # Compare the HD between maltreated and non-maltreated children #
+  hd_mod_data <- analytical_data %>%
+    dplyr::select(famid, g2id, hd_log_dev, 
+                  cm_yes, cm_cat_comp, cm_cat_comp_2,
+                  t1_age_g2, t1_gender_g2,
+                  t1_race_g2_recode, t1_eth_g2,
+                  t1_income_bracket, t1_ppl_household_recode,
+                  t1_bmi_percentile) %>%
+    na.omit()
+  ## binary CM
+  hd_mod_cmbin <- geeglm(hd_log_dev ~ cm_yes + t1_gender_g2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                         data = hd_mod_data, id = famid, corstr = "exchangeable")
+  
+  summary(hd_mod_cmbin)
+  
+  (hd_mod_cmbin_res <- tidy(hd_mod_cmbin, conf.int = T))
+  
+  ## specific CM types
+  hd_mod_cmcat <- geeglm(hd_log_dev ~ cm_cat_comp_2 + t1_gender_g2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                         data = hd_mod_data, id = famid, corstr = "exchangeable")
+  
+  summary(hd_mod_cmcat)
+  (hd_mod_cmcat_res <- tidy(hd_mod_cmcat, conf.int = T))
+  
+  hd_mod_res <- rbind(hd_mod_cmbin_res, hd_mod_cmcat_res) %>%
+    filter(str_detect(term, "cm")) %>%
+    mutate(term = str_remove(term, "(cm_yes|cm_cat_comp_2)"),
+           term = case_when(term == "Yes" ~ "Any maltreatment",
+                            TRUE ~ term)) %>%
+    mutate(sex = "Both",
+           ba = "hd")
+  
+  
+  ## binary CM by sex
+  ### female
+  hd_mod_cmbin_female <- geeglm(hd_log_dev ~ cm_yes + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                                data = hd_mod_data %>%
+                                  filter(t1_gender_g2 == "Female"), 
+                                id = famid, corstr = "exchangeable")
+  
+  summary(hd_mod_cmbin_female)
+  
+  (hd_mod_cmbin_female_res <- tidy(hd_mod_cmbin_female, conf.int = T) %>% mutate(sex = "Female"))
+  
+  ### male
+  hd_mod_cmbin_male <- geeglm(hd_log_dev ~ cm_yes + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                              data = hd_mod_data %>%
+                                filter(t1_gender_g2 == "Male"), 
+                              id = famid, corstr = "exchangeable")
+  
+  summary(hd_mod_cmbin_male)
+  
+  (hd_mod_cmbin_male_res <- tidy(hd_mod_cmbin_male, conf.int = T) %>% mutate(sex = "Male"))
+  
+  ## specific CM types by sex
+  ### female
+  hd_mod_cmcat_female <- geeglm(hd_log_dev ~ cm_cat_comp_2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                                data = hd_mod_data %>%
+                                  filter(t1_gender_g2 == "Female"), 
+                                id = famid, corstr = "exchangeable")
+  
+  summary(hd_mod_cmcat_female)
+  (hd_mod_cmcat_female_res <- tidy(hd_mod_cmcat_female, conf.int = T) %>% mutate(sex = "Female"))
+  
+  ### male
+  hd_mod_cmcat_male <- geeglm(hd_log_dev ~ cm_cat_comp_2 + t1_race_g2_recode + t1_eth_g2 + t1_income_bracket + t1_ppl_household_recode + t1_bmi_percentile,
+                              data = hd_mod_data %>%
+                                filter(t1_gender_g2 == "Male"), 
+                              id = famid, corstr = "exchangeable")
+  
+  summary(hd_mod_cmcat_male)
+  (hd_mod_cmcat_male_res <- tidy(hd_mod_cmcat_male, conf.int = T) %>% mutate(sex = "Male"))
+  
+  ## combine the results
+  hd_mod_bysex_res <- rbind(hd_mod_cmbin_female_res, hd_mod_cmbin_male_res,
+                            hd_mod_cmcat_female_res, hd_mod_cmcat_male_res) %>%
+    filter(str_detect(term, "cm")) %>%
+    mutate(term = str_remove(term, "(cm_yes|cm_cat_comp_2)"),
+           term = case_when(term == "Yes" ~ "Any maltreatment",
+                            TRUE ~ term)) %>%
+    mutate(ba = "hd")
+  
+  
+  # Combine all the results
+  result <- rbind(kdm_mod_res, kdm_mod_bysex_res,
+                  hd_mod_res, hd_mod_bysex_res) %>%
+    mutate(n_biomarker = length(biomarkers),
+           lymph = any(str_detect(biomarkers, "lymph")),
+           mcv = any(str_detect(biomarkers, "mcv")),
+           rdw = any(str_detect(biomarkers, "rdw")),
+           hgb = any(str_detect(biomarkers, "hgb")),
+           plt = any(str_detect(biomarkers, "plt")),
+           totchol = any(str_detect(biomarkers, "totchol")),
+           hdl = any(str_detect(biomarkers, "hdl")),
+           sbp = any(str_detect(biomarkers, "sbp")),
+           pulse = any(str_detect(biomarkers, "pulse")))
+  
+  return(result)
+}
+
+bio_list <- NULL
+for (i in 2:length(n3_biomarkers_update)){
+  bio_list <- c(bio_list, combn(n3_biomarkers_update, i, simplify = F))
+}
+bio_comb_res <- lapply(bio_list, process)
+bio_comb_res <- reduce(bio_comb_res, rbind)
+
+bio_comb_res <- bio_comb_res %>% 
+  mutate(ba = factor(ba, levels = c("kdm", "hd"), labels = c("KDM", "HD")))
+
+# Make plots showing how effect sizes change by number of biomarkers included in analyses
+bio_comb_res_anyCM <- bio_comb_res %>% filter(term == "Any maltreatment")
+ggplot(bio_comb_res_anyCM, aes(x = n_biomarker, y = estimate)) + 
+  geom_point(shape = 21, alpha = 0.5) +
+  geom_smooth(method = "lm", formula = y~x) +
+  geom_hline(aes(yintercept = 0), color = "red", linetype = "dashed") +
+  facet_grid(sex~ba, scale = "free") +
+  labs(x = "Number of biomarkers included", y = "Effect size estimate",
+       title = "Any maltreatment") +
+  theme_bw()
+
+bio_comb_res_PA <- bio_comb_res %>% filter(term == "Physical abuse")
+ggplot(bio_comb_res_PA, aes(x = n_biomarker, y = estimate)) + 
+  geom_point(shape = 21, alpha = 0.5) +
+  geom_smooth(method = "lm", formula = y~x) +
+  geom_hline(aes(yintercept = 0), color = "red", linetype = "dashed") +
+  facet_grid(sex~ba, scale = "free") +
+  labs(x = "Number of biomarkers included", y = "Effect size estimate",
+       title = "Physical abuse") +
+  guides(y = guide_axis(cap = T)) + 
+  theme_bw()
+
+bio_comb_res_SA <- bio_comb_res %>% filter(term == "Sexual abuse")
+ggplot(bio_comb_res_SA, aes(x = n_biomarker, y = estimate)) + 
+  geom_point(shape = 21, alpha = 0.5) +
+  geom_smooth(method = "lm", formula = y~x) +
+  geom_hline(aes(yintercept = 0), color = "red", linetype = "dashed") +
+  facet_grid(sex~ba, scale = "free") +
+  labs(x = "Number of biomarkers included", y = "Effect size estimate",
+       title = "Sexual abuse") +
+  theme_bw()
+
+bio_comb_res_N <- bio_comb_res %>% filter(term == "Neglect")
+ggplot(bio_comb_res_N, aes(x = n_biomarker, y = estimate)) + 
+  geom_point(shape = 21, alpha = 0.5) +
+  geom_smooth(method = "lm", formula = y~x) +
+  geom_hline(aes(yintercept = 0), color = "red", linetype = "dashed") +
+  facet_grid(sex~ba, scale = "free") +
+  labs(x = "Number of biomarkers included", y = "Effect size estimate",
+       title = "Neglect") +
+  theme_bw()
+
+bio_comb_res_poly <- bio_comb_res %>% filter(term == "Polyvictimization")
+ggplot(bio_comb_res_poly, aes(x = n_biomarker, y = estimate)) + 
+  geom_point(shape = 21, alpha = 0.5) +
+  geom_smooth(method = "lm", formula = y~x) +
+  geom_hline(aes(yintercept = 0), color = "red", linetype = "dashed") +
+  facet_grid(sex~ba, scale = "free") +
+  labs(x = "Number of biomarkers included", y = "Effect size estimate",
+       title = "Polyvictimization") +
+  theme_bw()
+
+```
+
+# Validation with the NHANES IV
+
+## Check the consistency of biomarker distributions among NHANES III, NHANES IV, and CHS
+
+```{r, fig.width=8.5, fig.height=5}
+n4_bio_data_long <- nhanes4_data_8to14[, c("sampleID", "year", n3_biomarkers_update)] %>%
+  pivot_longer(cols = all_of(unname(n3_biomarkers_update)), names_to = "biomarker_var", values_to = "biomarker_value") %>%
+  mutate(cohort = "NHANES IV")
+
+n4_bio_data_long$biomarker_name <- names(n3_biomarkers[match(n4_bio_data_long$biomarker_var, n3_biomarkers)])
+
+n3_bio_data_long <- nhanes3_data_8to14[, c("sampleID", n3_biomarkers_update)] %>%
+  pivot_longer(cols = all_of(unname(n3_biomarkers_update)), names_to = "biomarker_var", values_to = "biomarker_value") %>%
+  mutate(cohort = "NHANES III",
+         year = "NHANES III")
+
+chs_bio_data_long <- p50.data[, c("sampleID", n3_biomarkers_update)] %>%
+  pivot_longer(cols = all_of(unname(n3_biomarkers_update)), names_to = "biomarker_var", values_to = "biomarker_value") %>%
+  mutate(cohort = "CHS",
+         year = "CHS")
+
+bio_data_comb <- rbind(n3_bio_data_long, chs_bio_data_long)
+
+bio_data_comb$biomarker_name <- names(n3_biomarkers[match(bio_data_comb$biomarker_var, n3_biomarkers)])
+bio_data_comb <- rbind(bio_data_comb, n4_bio_data_long)
+
+ggplot(bio_data_comb, aes(x = biomarker_value, color = cohort, fill = cohort)) +
+  geom_density(alpha = 0.3) +
+  facet_wrap(~biomarker_name, scale = "free") +
+  labs(x = "Biomarker value", y = "Density") +
+  scale_color_discrete(name = "Year") +
+  scale_fill_discrete(name = "Year") +
+  theme_bw()
+
+```
+
+## Match NHANES IV participants with CHS participants by age, sex, and race/ethnicity
+
+```{r, fig.width=5, fig.height=10}
+# Check variables in NHANES4
+## check race
+freq(nhanes4_data_8to14$race_ethnicity)
+## check sex
+freq(nhanes4_data_8to14$sex)
+## rounded age for exact matching
+nhanes4_data_8to14$age_rounded <- round(nhanes4_data_8to14$age)
+
+## make a variable indicating cohort
+nhanes4_data_8to14$cohort <- "NHANES IV"
+
+# Check variables in CHS
+## combine race and ethnicity
+freq(p50.data$t1_race_g2_recode)
+freq(p50.data$t1_eth_g2)
+p50.data <- p50.data %>%
+  mutate(race_ethnicity = case_when(t1_eth_g2 == "Non-Hispanic" & t1_race_g2_recode == "White" ~ "Non-Hispanic White",
+                                    t1_eth_g2 == "Non-Hispanic" & t1_race_g2_recode == "Black or African American" ~ "Non-Hispanic Black",
+                                    t1_eth_g2 == "Hispanic" ~ "Hispanic",
+                                    t1_eth_g2 == "Non-Hispanic" & t1_race_g2_recode == "Other" ~ "Other"),
+         race_ethnicity = factor(race_ethnicity, levels = c("Non-Hispanic White", "Non-Hispanic Black", "Hispanic", "Other")))
+freq(p50.data$race_ethnicity)
+
+## check on sex
+freq(p50.data$sex)
+
+## check rounded age
+freq(p50.data$age_rounded)
+
+## check cohort variable
+freq(p50.data$cohort)
+
+# Combine the two datasets for matching procedure
+data_for_match <- rbind(na.omit(nhanes4_data_8to14[,c("cohort", "sampleID", "age_rounded", "sex", "race_ethnicity")]),
+                        na.omit(p50.data[,c("cohort", "sampleID", "age_rounded", "sex", "race_ethnicity")]))
+
+data_for_match <- data_for_match %>%
+  mutate(cohort = factor(cohort, levels = c("NHANES IV", "CHS")))
+freq(data_for_match$cohort)
+
+# Matching
+m_out <- matchit(cohort ~ age_rounded + sex + race_ethnicity,
+                 data = data_for_match, method = "exact",
+                 replace = F)
+
+## check on matching matrix
+head(m_out$match.matrix)
+
+## check on matched data
+mdata <- match.data(m_out)
+sum(mdata[mdata$cohort == "CHS",]$weights)
+sum(mdata[mdata$cohort == "NHANES IV",]$weights)
+
+## check the distribution of matched variables in two groups
+p1 <- bal.plot(m_out, var.name = "age_rounded", which = "both", grid = T,
+                   sample.names = c("Unmatched", "Matched")) + 
+  scale_fill_discrete(name = "Cohort",
+                      labels = c("0" = "NHANES IV", "1" = "CHS")) +
+  labs(title = "") +
+  xlab("Age (rounded to integer)")
+
+p2 <- bal.plot(m_out, var.name = "sex", which = "both", grid = T,
+                   sample.names = c("Unmatched", "Matched")) + 
+  scale_fill_discrete(name = "Cohort",
+                      labels = c("0" = "NHANES IV", "1" = "CHS")) +
+  labs(title = "") +
+  xlab("Sex")
+
+p3 <- bal.plot(m_out, var.name = "race_ethnicity", which = "both", grid = T,
+                   sample.names = c("Unmatched", "Matched")) + 
+  scale_fill_discrete(name = "Cohort",
+                      labels = c("0" = "NHANES IV", "1" = "CHS")) +
+  labs(title = "") +
+  xlab("Race/ethnicity") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+
+ggarrange(p1, p2, p3, nrow = 3, ncol = 1, common.legend = T, labels = "AUTO",
+          heights = c(1, 1, 1.3))
+
+# Merge the matching weights with the original data
+nhanes4_data_8to14 <- mdata %>%
+  dplyr::select(sampleID, subclass, weights) %>%
+  right_join(nhanes4_data_8to14, by = "sampleID")
+```
+
+## Check the consistency of biomarker distribution after matching
+
+```{r, fig.width=8.5, fig.height=5}
+n4_bio_data_long <- nhanes4_data_8to14[, c("sampleID", "year", "weights", n3_biomarkers_update)] %>%
+  pivot_longer(cols = all_of(unname(n3_biomarkers_update)), names_to = "biomarker_var", values_to = "biomarker_value") %>%
+  mutate(cohort = "NHANES IV")
+
+n3_bio_data_long <- nhanes3_data_8to14[, c("sampleID", "weights", n3_biomarkers_update)] %>%
+  pivot_longer(cols = all_of(unname(n3_biomarkers_update)), names_to = "biomarker_var", values_to = "biomarker_value") %>%
+  mutate(cohort = "NHANES III",
+         year = "NHANES III")
+
+chs_bio_data_long <- p50.data[, c("sampleID", "weights", n3_biomarkers_update)] %>%
+  pivot_longer(cols = all_of(unname(n3_biomarkers_update)), names_to = "biomarker_var", values_to = "biomarker_value") %>%
+  mutate(cohort = "CHS",
+         year = "CHS")
+
+bio_data_comb <- rbind(n3_bio_data_long, chs_bio_data_long, n4_bio_data_long)
+
+bio_data_comb$biomarker_name <- names(n3_biomarkers[match(bio_data_comb$biomarker_var, n3_biomarkers)])
+
+ggplot(bio_data_comb %>% filter(!is.na(weights)), aes(x = biomarker_value, color = cohort, fill = cohort)) +
+  geom_density(alpha = 0.3, aes(weight = weights)) +
+  facet_wrap(~biomarker_name, scale = "free") +
+  labs(x = "Biomarker value", y = "Density") +
+  scale_color_discrete(name = "Year") +
+  scale_fill_discrete(name = "Year") +
+  theme_bw()
+
+```
+
+## KDM and HD calculation
+
+```{r}
+# KDM calculation
+kdm_ref_female <- kdm_calc_update_2(data = nhanes3_data_8to14 %>% 
+                                      filter(!is.na(weights)) %>%
+                                      filter(sex == "Female"),
+                                    biomarkers = n3_biomarkers_update)
+
+kdm_ref_male <- kdm_calc_update_2(data = nhanes3_data_8to14 %>% 
+                                    filter(!is.na(weights)) %>%
+                                    filter(sex == "Male"),
+                                  biomarkers = n3_biomarkers_update)
+
+n4_kdm_female <- kdm_calc_update(data = nhanes4_data_8to14 %>%
+                                filter(sex == "Female"),
+                              biomarkers = n3_biomarkers_update,
+                              fit = kdm_ref_female$fit,
+                              s_ba2 = kdm_ref_female$fit$s_ba2)
+
+n4_kdm_male <- kdm_calc_update(data = nhanes4_data_8to14 %>%
+                              filter(sex == "Male"),
+                            biomarkers = n3_biomarkers_update,
+                            fit = kdm_ref_male$fit,
+                            s_ba2 = kdm_ref_male$fit$s_ba2)
+n4_kdm_female$data$kdm_dev <- residuals(lm(kdm ~ age, data = n4_kdm_female$data, na.action = na.exclude, weights = weights))
+n4_kdm_male$data$kdm_dev <- residuals(lm(kdm ~ age, data = n4_kdm_male$data, na.action = na.exclude, weights = weights))
+
+n4_kdm_data <- rbind(n4_kdm_female$data, n4_kdm_male$data) %>% dplyr::select(sampleID, kdm, kdm_dev)
+
+nhanes4_data_8to14 <- nhanes4_data_8to14 %>%
+  left_join(n4_kdm_data, by = "sampleID")
+
+# HD calculation
+n4_hd_female <- hd_calc_update_2(data = nhanes4_data_8to14 %>% 
+                                filter(sex == "Female"),
+                              reference = nhanes3_data_8to14 %>% 
+                                filter(!is.na(weights)) %>%
+                                filter(sex == "Female"),
+                              biomarkers = n3_biomarkers_update)
+
+n4_hd_male <- hd_calc_update_2(data = nhanes4_data_8to14 %>%
+                              filter(sex == "Male"),
+                            reference = nhanes3_data_8to14 %>% 
+                              filter(!is.na(weights)) %>%
+                              filter(sex == "Male"),
+                            biomarkers = n3_biomarkers_update)
+
+n4_hd_female$data$hd_log_dev <- residuals(lm(hd_log ~ age, data = n4_hd_female$data, na.action = na.exclude, weights = weights))
+n4_hd_male$data$hd_log_dev <- residuals(lm(hd_log ~ age, data = n4_hd_male$data, na.action = na.exclude, weights = weights))
+
+n4_hd_data <- rbind(n4_hd_female$data, n4_hd_male$data) %>% dplyr::select(sampleID, hd, hd_log, hd_log_dev)
+
+nhanes4_data_8to14 <- nhanes4_data_8to14 %>%
+  left_join(n4_hd_data, by = "sampleID")
+
+```
+
+## Relationship of KDM and HD with chronological age
+
+```{r, fig.width=6, fig.height=7}
+n4_kdm_age_plot <- ggplot(nhanes4_data_8to14, aes(x = age, y = kdm)) +
+  geom_point(shape = 21, alpha = 0.5, aes(color = sex)) + 
+  geom_smooth(method = "lm", formula = y~x, aes(weight = weights)) +
+  facet_wrap(~sex) +
+  labs(x = "Chronological age", y = "KDM physiological age") +
+  scale_color_discrete(guide = "none") +
+  theme_bw()
+
+
+n4_hd_age_plot <- ggplot(nhanes4_data_8to14, aes(x = age, y = hd_log)) +
+  geom_point(shape = 21, alpha = 0.5, aes(color = sex)) + 
+  geom_smooth(method = "lm", formula = y~x, aes(weight = weights)) +
+  facet_wrap(~sex) +
+  labs(x = "Chronological age", y = "HD (log)") +
+  scale_color_discrete(guide = "none") +
+  theme_bw()
+
+
+ggarrange(n4_kdm_age_plot, n4_hd_age_plot, nrow = 2, labels = "AUTO")
+
+```
+
+## Relationship of KDM and HD with other variables
+
+```{r, fig.width=7, fig.height=5}
+## linear regression
+lm_kdm <- lm(kdm_dev ~ sex + race_ethnicity + poverty_ratio, data = nhanes4_data_8to14, weights = weights)
+lm_hd <- lm(hd_log_dev ~ sex + race_ethnicity + poverty_ratio, data = nhanes4_data_8to14, weights = weights)
+
+lm_kdm_tidy <- tidy(lm_kdm) %>% mutate(ba_measure = "kdm")
+
+lm_hd_tidy <- tidy(lm_hd) %>% mutate(ba_measure = "hd")
+
+lm_res_n4 <- rbind(lm_kdm_tidy, lm_hd_tidy)
+
+lm_kdm_female <- lm(kdm_dev ~ race_ethnicity + poverty_ratio,
+                    data = nhanes4_data_8to14 %>% filter(sex == "Female"), weights = weights)
+lm_hd_female <- lm(hd_log_dev ~ race_ethnicity + poverty_ratio,
+                   data = nhanes4_data_8to14 %>% filter(sex == "Female"), weights = weights)
+
+lm_kdm_male <- lm(kdm_dev ~ race_ethnicity + poverty_ratio,
+                  data = nhanes4_data_8to14 %>% filter(sex == "Male"), weights = weights)
+lm_hd_male <- lm(hd_log_dev ~ race_ethnicity + poverty_ratio,
+                 data = nhanes4_data_8to14 %>% filter(sex == "Male"), weights = weights)
+
+
+## Plot
+jtools::plot_summs(`KDM` = lm_kdm, 
+                   `HD` = lm_hd,
+                   legend.title = "",
+                   coefs = c("NH Black vs. NH White" = "race_ethnicityNon-Hispanic Black",
+                             "Hispanic vs. NH White" = "race_ethnicityHispanic",
+                             "Other race vs. NH White" = "race_ethnicityOther",
+                             "Income-to-poverty ratio" = "poverty_ratio",
+                             "Self-rated health (fair vs. poor)" = "healthFair",
+                             "Self-rated health (good vs. poor)" = "healthGood",
+                             "Self-rated health (very good vs. poor)" = "healthVery good",
+                             "Self-rated health (excellent vs. poor)" = "healthExcellent"))
+
+
+
+jtools::plot_summs(`KDM (female)` = lm_kdm_female, 
+                   `KDM (male)` = lm_kdm_male,
+                   `HD (female)` = lm_hd_female,
+                   `HD (male)` = lm_hd_male,
+                   legend.title = "",
+                   coefs = c("NH Black vs. NH White" = "race_ethnicityNon-Hispanic Black",
+                             "Hispanic vs. NH White" = "race_ethnicityHispanic",
+                             "Other race vs. NH White" = "race_ethnicityOther",
+                             "Income-to-poverty ratio" = "poverty_ratio",
+                             "Self-rated health (fair vs. poor)" = "healthFair",
+                             "Self-rated health (good vs. poor)" = "healthGood",
+                             "Self-rated health (very good vs. poor)" = "healthVery good",
+                             "Self-rated health (excellent vs. poor)" = "healthExcellent"))
+
+
+
+```
+
+# Descriptive analyses
+
+## CHS visit 1 participants
+
+```{r}
+# Demographics
+crosstable(p50.data %>% filter(!is.na(kdm)|!is.na(hd_log)), cols = c(`Age (v1)` = "t1_age_g2", `Sex` = "t1_gender_g2", `Race` = "t1_race_g2_recode", `Ethnicity` = "t1_eth_g2", `Income (v1)` = "t1_income_bracket", `N of people in the household (v1)` = "t1_ppl_household_recode", `Maltreatment type` = "cm_cat_comp_2", `BMI percentile (v1)` = "t1_bmi_percentile"),
+           funs = c(`Mean (SD)` = meansd,
+                    `Min / Max` = minmax,
+                    `N (NA)` = nna),
+           num_digits = 2) %>%
+  rename(ID=.id, `Variable` = label, `Statistics/Levels` = variable, Value = value) %>%
+  as_flextable(generic_labels = list(id = "ID", label = "Variable", 
+                                     variable = "Statistics/Levels", value = "Value"))
+
+# Demographics by binary CM
+crosstable(p50.data %>% filter(!is.na(kdm)|!is.na(hd_log)), 
+           cols = c(`Age (v1)` = "t1_age_g2", `Sex` = "t1_gender_g2", `Race` = "t1_race_g2_recode", `Ethnicity` = "t1_eth_g2", `Income (v1)` = "t1_income_bracket", `N of people in the household (v1)` = "t1_ppl_household_recode", `BMI percentile (v1)` = "t1_bmi_percentile"),
+           by = "cm_yes", percent_pattern = "{n} ({p_col})", test = T, showNA = "no",
+           num_digits = 2, 
+           funs = c(`Mean (SD)` = meansd,
+                    `Min / Max` = minmax,
+                    `N (NA)` = nna)) %>%
+  rename(ID=.id, `Variable` = label, `Statistics/Levels` = variable) %>%
+  as_flextable(generic_labels = list(id = "ID", label = "Variable", 
+                                     variable = "Statistics/Levels", value = "Value"))
+  
+# Demographics by CM types
+crosstable(p50.data %>% filter(!is.na(kdm)|!is.na(hd_log)), cols = c(`Age (v1)` = "t1_age_g2", `Sex` = "t1_gender_g2", `Race` = "t1_race_g2_recode", `Ethnicity` = "t1_eth_g2", `Income (v1)` = "t1_income_bracket", `N of people in the household (v1)` = "t1_ppl_household_recode", `BMI percentile (v1)` = "t1_bmi_percentile"),
+           by = "cm_cat_comp_2", percent_pattern = "{n} ({p_col})",
+           funs = c(`Mean (SD)` = meansd,
+                    `Min / Max` = minmax,
+                    `N (NA)` = nna)) %>%
+  rename(ID=.id, `Variable` = label, `Statistics/Levels` = variable) %>%
+  as_flextable(generic_labels = list(id = "ID", label = "Variable", 
+                                     variable = "Statistics/Levels"))
+
+data_temp <- p50.data %>%
+  mutate(cm_pa = factor(cm_cat_comp_2, levels = c("Comparison", "Physical abuse")),
+         cm_sa = factor(cm_cat_comp_2, levels = c("Comparison", "Sexual abuse")),
+         cm_n = factor(cm_cat_comp_2, levels = c("Comparison", "Neglect")),,
+         cm_pv = factor(cm_cat_comp_2, levels = c("Comparison", "Polyvictimization")),)
+
+freq(data_temp[, c("cm_pa", "cm_sa", "cm_n", "cm_pv")])
+
+crosstable(data_temp %>% filter(!is.na(kdm)|!is.na(hd_log)), 
+           cols = c(`Age (v1)` = "t1_age_g2", `Sex` = "t1_gender_g2", `Race` = "t1_race_g2_recode", `Ethnicity` = "t1_eth_g2", `Income (v1)` = "t1_income_bracket", `N of people in the household (v1)` = "t1_ppl_household_recode", `BMI percentile (v1)` = "t1_bmi_percentile"),
+           by = "cm_pa", percent_pattern = "{n} ({p_col})", test = T, showNA = "no",
+           funs = c(`Mean (SD)` = meansd,
+                    `Min / Max` = minmax,
+                    `N (NA)` = nna)) %>%
+  rename(ID=.id, `Variable` = label, `Statistics/Levels` = variable) %>%
+  as_flextable(generic_labels = list(id = "ID", label = "Variable", 
+                                     variable = "Statistics/Levels"))
+
+crosstable(data_temp %>% filter(!is.na(kdm)|!is.na(hd_log)), 
+           cols = c(`Age (v1)` = "t1_age_g2", `Sex` = "t1_gender_g2", `Race` = "t1_race_g2_recode", `Ethnicity` = "t1_eth_g2", `Income (v1)` = "t1_income_bracket", `N of people in the household (v1)` = "t1_ppl_household_recode", `BMI percentile (v1)` = "t1_bmi_percentile"),
+           by = "cm_sa", percent_pattern = "{n} ({p_col})", test = T, showNA = "no",
+           funs = c(`Mean (SD)` = meansd,
+                    `Min / Max` = minmax,
+                    `N (NA)` = nna)) %>%
+  rename(ID=.id, `Variable` = label, `Statistics/Levels` = variable) %>%
+  as_flextable(generic_labels = list(id = "ID", label = "Variable", 
+                                     variable = "Statistics/Levels"))
+
+crosstable(data_temp %>% filter(!is.na(kdm)|!is.na(hd_log)), 
+           cols = c(`Age (v1)` = "t1_age_g2", `Sex` = "t1_gender_g2", `Race` = "t1_race_g2_recode", `Ethnicity` = "t1_eth_g2", `Income (v1)` = "t1_income_bracket", `N of people in the household (v1)` = "t1_ppl_household_recode", `BMI percentile (v1)` = "t1_bmi_percentile"),
+           by = "cm_n", percent_pattern = "{n} ({p_col})", test = T, showNA = "no",
+           funs = c(`Mean (SD)` = meansd,
+                    `Min / Max` = minmax,
+                    `N (NA)` = nna)) %>%
+  rename(ID=.id, `Variable` = label, `Statistics/Levels` = variable) %>%
+  as_flextable(generic_labels = list(id = "ID", label = "Variable", 
+                                     variable = "Statistics/Levels"))
+
+crosstable(data_temp %>% filter(!is.na(kdm)|!is.na(hd_log)), 
+           cols = c(`Age (v1)` = "t1_age_g2", `Sex` = "t1_gender_g2", `Race` = "t1_race_g2_recode", `Ethnicity` = "t1_eth_g2", `Income (v1)` = "t1_income_bracket", `N of people in the household (v1)` = "t1_ppl_household_recode", `BMI percentile (v1)` = "t1_bmi_percentile"),
+           by = "cm_pv", percent_pattern = "{n} ({p_col})", test = T, showNA = "no",
+           funs = c(`Mean (SD)` = meansd,
+                    `Min / Max` = minmax,
+                    `N (NA)` = nna)) %>%
+  rename(ID=.id, `Variable` = label, `Statistics/Levels` = variable) %>%
+  as_flextable(generic_labels = list(id = "ID", label = "Variable", 
+                                     variable = "Statistics/Levels"))
+
+# Biomarkers
+crosstable(p50.data %>% filter(!is.na(kdm)|!is.na(hd_log)), cols = c(all_of(n3_biomarkers_update)),
+           funs = c(`Mean (SD)` = meansd,
+                    `Min / Max` = minmax,
+                    `N (NA)` = nna)) %>%
+  rename(ID=.id, `Variable` = label, `Statistics/Levels` = variable, Value = value) %>%
+  as_flextable(generic_labels = list(id = "ID", label = "Variable", 
+                                     variable = "Statistics/Levels", value = "Value"))
+
+# Compare participants with and without missing
+p50.data.original <- p50.data.original %>%
+  mutate(included = ifelse(g2id %in% p50.data[!is.na(p50.data$weights),]$g2id, "Included", "Excluded"))
+
+crosstable(p50.data.original, cols = c(`Age (v1)` = "t1_age_g2", `Sex` = "t1_gender_g2", `Race` = "t1_race_g2_recode", `Ethnicity` = "t1_eth_g2", `Income (v1)` = "t1_income_bracket", `N of people in the household (v1)` = "t1_ppl_household_recode", `Maltreatment type` = "cm_cat_comp_2", `BMI percentile (v1)` = "t1_bmi_percentile"),
+           by = "included",
+           percent_pattern = "{n} ({p_col})",
+           test = T,
+           test_args = crosstable_test_args(show_method = F),
+           funs = c(`Mean (SD)` = meansd,
+                    `Min / Max` = minmax,
+                    `Missing` = na)) %>%
+  rename(ID=.id, `Variable` = label, `Statistics/Levels` = variable, `P value` = test) %>%
+  as_flextable(by_header = "Value",
+               generic_labels = list(id = "ID", label = "Variable", 
+                                     variable = "Statistics/Levels",
+                                     test = "P value"))
+```
+
+## NHANES III (8-14 years)
+
+```{r}
+crosstable(nhanes3_data_8to14, cols = c(Age = "age", Sex = "sex", Race = "race", Ethnicity = "ethnicity"),
+           funs = c(`Mean (SD)` = meansd,
+                    `Min / Max` = minmax,
+                    `N (NA)` = nna)) %>%
+  rename(ID=.id, `Variable` = label, `Statistics/Levels` = variable, Value = value) %>%
+  as_flextable(generic_labels = list(id = "ID", label = "Variable", 
+                                     variable = "Statistics/Levels", value = "Value"))
+
+crosstable(nhanes3_data_8to14, cols = c(all_of(n3_biomarkers_update)),
+           funs = c(`Mean (SD)` = meansd,
+                    `Min / Max` = minmax,
+                    `N (NA)` = nna)) %>%
+  rename(ID=.id, `Variable` = label, `Statistics/Levels` = variable, Value = value) %>%
+  as_flextable(generic_labels = list(id = "ID", label = "Variable", 
+                                     variable = "Statistics/Levels", value = "Value"))
+
+```
+
+## NHANES IV (8-14 years)
+
+```{r}
+crosstable(nhanes4_data_8to14 %>% filter((!is.na(kdm))|!is.na(hd_log)), cols = c(Age = "age", Sex = "sex", `Race/ethnicity` = "race_ethnicity"),
+           funs = c(`Mean (SD)` = meansd,
+                    `Min / Max` = minmax,
+                    `N (NA)` = nna)) %>% 
+  rename(ID=.id, `Variable` = label, `Statistics/Levels` = variable, Value = value) %>%
+  as_flextable(generic_labels = list(id = "ID", label = "Variable", 
+                                     variable = "Statistics/Levels", value = "Value"))
+
+crosstable(nhanes4_data_8to14, cols = c(all_of(n3_biomarkers_update)),
+           funs = c(`Mean (SD)` = meansd,
+                    `Min / Max` = minmax,
+                    `N (NA)` = nna)) %>% 
+  rename(ID=.id, `Variable` = label, `Statistics/Levels` = variable, Value = value) %>%
+  as_flextable(generic_labels = list(id = "ID", label = "Variable", 
+                                     variable = "Statistics/Levels", value = "Value"))
+```
