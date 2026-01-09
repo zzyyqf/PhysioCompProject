@@ -34,8 +34,7 @@ library(MatchIt)
 library(ggbreak)
 library(cobalt)
 setwd("/Users/qiaofengye/Library/CloudStorage/OneDrive-ThePennsylvaniaStateUniversity/Research/PhysioAge")
-source("CodeScripts/RFunctions/kdm_calc_update.R")
-source("CodeScripts/RFunctions/kdm_calc_update_2.R")
+source("CodeScripts/RFunctions/kdm_calc_update_4.R")
 source("CodeScripts/RFunctions/hd_calc_update_2.R")
 ```
 
@@ -846,12 +845,12 @@ describeBy(biomarker_value ~ cohort + biomarker_name, data = bio_data_comb)
 # KDM calculation
 
 ```{r}
-kdm_ref_female <- kdm_calc_update_2(data = nhanes3_data_8to14 %>% 
+kdm_ref_female <- kdm_calc_update_4(data = nhanes3_data_8to14 %>% 
                                       filter(!is.na(weights)) %>%
                                       filter(sex == "Female"),
                                   biomarkers = n3_biomarkers_update)
 
-kdm_ref_male <- kdm_calc_update_2(data = nhanes3_data_8to14 %>% 
+kdm_ref_male <- kdm_calc_update_4(data = nhanes3_data_8to14 %>% 
                                     filter(!is.na(weights)) %>%
                                     filter(sex == "Male"),
                                 biomarkers = n3_biomarkers_update)
@@ -865,23 +864,28 @@ kdm_ref_data <- rbind(kdm_ref_female$data, kdm_ref_male$data) %>% dplyr::select(
 nhanes3_data_8to14 <- nhanes3_data_8to14 %>%
   left_join(kdm_ref_data, by = "sampleID")
 
-kdm_female <- kdm_calc_update(data = p50.data %>%
+kdm_female <- kdm_calc_update_4(data = p50.data %>%
                                 filter(!is.na(weights)) %>%
                                 filter(t1_gender_g2 == "Female"),
                               biomarkers = n3_biomarkers_update,
                               fit = kdm_ref_female$fit,
                               s_ba2 = kdm_ref_female$fit$s_ba2)
 
-kdm_male <- kdm_calc_update(data = p50.data %>%
+kdm_male <- kdm_calc_update_4(data = p50.data %>%
                               filter(!is.na(weights)) %>%
                               filter(t1_gender_g2 == "Male"),
                             biomarkers = n3_biomarkers_update,
                             fit = kdm_ref_male$fit,
                             s_ba2 = kdm_ref_male$fit$s_ba2)
 kdm_female$data$kdm_dev <- residuals(lm(kdm ~ t1_age_g2, data = kdm_female$data, na.action = na.exclude))
-kdm_male$data$kdm_dev <- residuals(lm(kdm ~ t1_age_g2, data = kdm_male$data, na.action = na.exclude))
+kdm_female$data$kdm_dev_nonz <- kdm_female$data$kdm_dev
+kdm_female$data$kdm_dev <- scale(kdm_female$data$kdm_dev)[,1]
 
-kdm_data <- rbind(kdm_female$data, kdm_male$data) %>% dplyr::select(g2id, kdm, kdm_dev)
+kdm_male$data$kdm_dev <- residuals(lm(kdm ~ t1_age_g2, data = kdm_male$data, na.action = na.exclude))
+kdm_male$data$kdm_dev_nonz <- kdm_male$data$kdm_dev
+kdm_male$data$kdm_dev <- scale(kdm_male$data$kdm_dev)[,1]
+
+kdm_data <- rbind(kdm_female$data, kdm_male$data) %>% dplyr::select(g2id, kdm, kdm_dev, kdm_dev_nonz)
 
 p50.data <- p50.data %>%
   left_join(kdm_data, by = "g2id")
@@ -916,8 +920,6 @@ hd_ref_data <- rbind(hd_ref_female$data, hd_ref_male$data) %>% dplyr::select(sam
 nhanes3_data_8to14 <- nhanes3_data_8to14 %>%
   left_join(hd_ref_data, by = "sampleID")
 
-
-
 # CHS
 hd_female <- hd_calc_update_2(data = p50.data %>% 
                                 filter(!is.na(weights)) %>%
@@ -936,9 +938,14 @@ hd_male <- hd_calc_update_2(data = p50.data %>%
                             biomarkers = n3_biomarkers_update)
 
 hd_female$data$hd_log_dev <- residuals(lm(hd_log ~ t1_age_g2, data = hd_female$data, na.action = na.exclude))
-hd_male$data$hd_log_dev <- residuals(lm(hd_log ~ t1_age_g2, data = hd_male$data, na.action = na.exclude))
+hd_female$data$hd_log_dev_nonz <- hd_female$data$hd_log_dev
+hd_female$data$hd_log_dev <- scale(hd_female$data$hd_log_dev)[,1]
 
-hd_data <- rbind(hd_female$data, hd_male$data) %>% dplyr::select(g2id, hd, hd_log, hd_log_dev)
+hd_male$data$hd_log_dev <- residuals(lm(hd_log ~ t1_age_g2, data = hd_male$data, na.action = na.exclude))
+hd_male$data$hd_log_dev_nonz <- hd_male$data$hd_log_dev
+hd_male$data$hd_log_dev <- scale(hd_male$data$hd_log_dev)[,1]
+
+hd_data <- rbind(hd_female$data, hd_male$data) %>% dplyr::select(g2id, hd, hd_log, hd_log_dev, hd_log_dev_nonz)
 
 p50.data <- p50.data %>%
   left_join(hd_data, by = "g2id")
@@ -1116,8 +1123,7 @@ kdm_mod_res |>
              boxsize = 0.10,
              line.margin = 0.2,
              xlab = "Effect size of maltreatment\non KDM physiological age",
-             xticks = c(-0.50, -0.25, 0, 0.25),
-             #xticks = c(-1, -0.5, 0, 0.5, 1.0, 1.5),
+             xticks = c(-1, -0.5, 0, 0.5),
              vertices = T,
              ci.vertices.height = 0.05,
              legend_args = fpLegend(pos = list(x = 0.25, y = 0.97,
@@ -1154,8 +1160,7 @@ kdm_mod_bysex_res |>
              boxsize = 0.10,
              line.margin = 0.30,
              xlab = "Effect size of maltreatment\non KDM physiological age",
-             xticks = c(-0.50, -0.25, 0, 0.25),
-             #xticks = c(-1, -0.5, 0, 0.5, 1.0, 1.5),
+             xticks = c(-1, -0.5, 0, 0.5),
              vertices = T,
              ci.vertices.height = 0.05,
              legend_args = fpLegend(pos = list(x = 0, y = 1.00,
@@ -1296,7 +1301,6 @@ hd_mod_res |>
     boxsize = 0.10,
     line.margin = 0.2,
     xlab = "Effect size of maltreatment\non physiological HD",
-    #xticks = c(-1, -0.5, 0, 0.5, 1.0, 1.5),
     xticks = c(-0.5, 0, 0.5, 1.0),
     vertices = T,
     ci.vertices.height = 0.05,
@@ -1334,7 +1338,6 @@ hd_mod_bysex_res |>
     boxsize = 0.10,
     line.margin = 0.30,
     xlab = "Effect size of maltreatment\non physiological HD",
-    #xticks = c(-1, -0.5, 0, 0.5, 1.0, 1.5),
     xticks = c(-0.5, 0, 0.5, 1.0),
     vertices = T,
     ci.vertices.height = 0.05,
@@ -1681,8 +1684,7 @@ kdm_mod_res |>
              boxsize = 0.10,
              line.margin = 0.2,
              xlab = "Effect size of maltreatment\non KDM physiological age",
-             xticks = c(-0.50, -0.25, 0, 0.25),
-             #xticks = c(-1, -0.5, 0, 0.5, 1.0, 1.5),
+             xticks = c(-1, -0.5, 0, 0.5),
              vertices = T,
              ci.vertices.height = 0.05,
              legend_args = fpLegend(pos = list(x = 0.25, y = 0.97,
@@ -1719,8 +1721,7 @@ kdm_mod_bysex_res |>
              boxsize = 0.10,
              line.margin = 0.30,
              xlab = "Effect size of maltreatment\non KDM physiological age",
-             xticks = c(-0.50, -0.25, 0, 0.25),
-             #xticks = c(-1, -0.5, 0, 0.5, 1.0, 1.5),
+             xticks = c(-1, -0.5, 0, 0.5),
              vertices = T,
              ci.vertices.height = 0.05,
              legend_args = fpLegend(pos = list(x = 0, y = 1.00,
@@ -1755,7 +1756,7 @@ hd_mod_data <- p50.data %>%
   na.omit()
 ```
 
-## Modeling and effect extraction
+### Modeling and effect extraction
 
 ```{r}
 ## binary CM
@@ -1831,7 +1832,7 @@ hd_mod_bysex_res <- rbind(hd_mod_cmbin_female_res, hd_mod_cmbin_male_res,
 
 ```
 
-## Make a forest plot
+### Make a forest plot
 
 ```{r, fig.width=6, fig.height=4}
 # Make a forest plot 
@@ -1857,7 +1858,6 @@ hd_mod_res |>
     boxsize = 0.10,
     line.margin = 0.2,
     xlab = "Effect size of maltreatment\non physiological HD",
-    #xticks = c(-1, -0.5, 0, 0.5, 1.0, 1.5),
     xticks = c(-0.5, 0, 0.5, 1.0),
     vertices = T,
     ci.vertices.height = 0.05,
@@ -1895,7 +1895,6 @@ hd_mod_bysex_res |>
     boxsize = 0.10,
     line.margin = 0.30,
     xlab = "Effect size of maltreatment\non physiological HD",
-    #xticks = c(-1, -0.5, 0, 0.5, 1.0, 1.5),
     xticks = c(-0.5, 0, 0.5, 1.0),
     vertices = T,
     ci.vertices.height = 0.05,
@@ -1937,29 +1936,33 @@ process <- function(biomarkers = n3_biomarkers_update,
   }
   
   # KDM calculation #
-  kdm_ref_female <- kdm_calc_update_2(data = reference_data %>% 
+  kdm_ref_female <- kdm_calc_update_4(data = reference_data %>% 
                                         filter(!is.na(weights)) %>%
                                         filter(sex == "Female"),
                                     biomarkers = biomarkers)
   
-  kdm_ref_male <- kdm_calc_update_2(data = reference_data %>% 
+  kdm_ref_male <- kdm_calc_update_4(data = reference_data %>% 
                                       filter(!is.na(weights)) %>%
                                       filter(sex == "Male"),
                                   biomarkers = biomarkers)
   
-  kdm_female <- kdm_calc_update(data = analytical_data %>%
+  kdm_female <- kdm_calc_update_4(data = analytical_data %>%
+                                    filter(!is.na(weights)) %>%
                                   filter(t1_gender_g2 == "Female"),
                                 biomarkers = biomarkers,
                                 fit = kdm_ref_female$fit,
                                 s_ba2 = kdm_ref_female$fit$s_ba2)
   
-  kdm_male <- kdm_calc_update(data = analytical_data %>%
+  kdm_male <- kdm_calc_update_4(data = analytical_data %>%
+                                  filter(!is.na(weights)) %>%
                                 filter(t1_gender_g2 == "Male"),
                               biomarkers = biomarkers,
                               fit = kdm_ref_male$fit,
                               s_ba2 = kdm_ref_male$fit$s_ba2)
   kdm_female$data$kdm_dev <- residuals(lm(kdm ~ t1_age_g2, data = kdm_female$data, na.action = na.exclude))
+  kdm_female$data$kdm_dev <- scale(kdm_female$data$kdm_dev)[,1]
   kdm_male$data$kdm_dev <- residuals(lm(kdm ~ t1_age_g2, data = kdm_male$data, na.action = na.exclude))
+  kdm_male$data$kdm_dev <- scale(kdm_male$data$kdm_dev)[,1]
   kdm_data <- rbind(kdm_female$data, kdm_male$data) %>% dplyr::select(g2id, kdm, kdm_dev)
   
   analytical_data <- analytical_data %>%
@@ -1981,7 +1984,9 @@ process <- function(biomarkers = n3_biomarkers_update,
                      biomarkers = biomarkers)
   
   hd_female$data$hd_log_dev <- residuals(lm(hd_log ~ t1_age_g2, data = hd_female$data, na.action = na.exclude))
+  hd_female$data$hd_log_dev <- scale(hd_female$data$hd_log_dev)[,1]
   hd_male$data$hd_log_dev <- residuals(lm(hd_log ~ t1_age_g2, data = hd_male$data, na.action = na.exclude))
+  hd_male$data$hd_log_dev <- scale(hd_male$data$hd_log_dev)[,1]
 
   hd_data <- rbind(hd_female$data, hd_male$data) %>% dplyr::select(g2id, hd, hd_log, hd_log_dev)
   
@@ -2391,29 +2396,33 @@ ggplot(bio_data_comb %>% filter(!is.na(weights)), aes(x = biomarker_value, color
 
 ```{r}
 # KDM calculation
-kdm_ref_female <- kdm_calc_update_2(data = nhanes3_data_8to14 %>% 
+kdm_ref_female <- kdm_calc_update_4(data = nhanes3_data_8to14 %>% 
                                       filter(!is.na(weights)) %>%
                                       filter(sex == "Female"),
                                     biomarkers = n3_biomarkers_update)
 
-kdm_ref_male <- kdm_calc_update_2(data = nhanes3_data_8to14 %>% 
+kdm_ref_male <- kdm_calc_update_4(data = nhanes3_data_8to14 %>% 
                                     filter(!is.na(weights)) %>%
                                     filter(sex == "Male"),
                                   biomarkers = n3_biomarkers_update)
 
-n4_kdm_female <- kdm_calc_update(data = nhanes4_data_8to14 %>%
+n4_kdm_female <- kdm_calc_update_4(data = nhanes4_data_8to14 %>%
+                                     filter(!is.na(weights)) %>%
                                 filter(sex == "Female"),
                               biomarkers = n3_biomarkers_update,
                               fit = kdm_ref_female$fit,
                               s_ba2 = kdm_ref_female$fit$s_ba2)
 
-n4_kdm_male <- kdm_calc_update(data = nhanes4_data_8to14 %>%
+n4_kdm_male <- kdm_calc_update_4(data = nhanes4_data_8to14 %>%
+                                   filter(!is.na(weights)) %>%
                               filter(sex == "Male"),
                             biomarkers = n3_biomarkers_update,
                             fit = kdm_ref_male$fit,
                             s_ba2 = kdm_ref_male$fit$s_ba2)
 n4_kdm_female$data$kdm_dev <- residuals(lm(kdm ~ age, data = n4_kdm_female$data, na.action = na.exclude, weights = weights))
+n4_kdm_female$data$kdm_dev <- scale(n4_kdm_female$data$kdm_dev)[,1]
 n4_kdm_male$data$kdm_dev <- residuals(lm(kdm ~ age, data = n4_kdm_male$data, na.action = na.exclude, weights = weights))
+n4_kdm_male$data$kdm_dev <- scale(n4_kdm_male$data$kdm_dev)[,1]
 
 n4_kdm_data <- rbind(n4_kdm_female$data, n4_kdm_male$data) %>% dplyr::select(sampleID, kdm, kdm_dev)
 
@@ -2436,7 +2445,9 @@ n4_hd_male <- hd_calc_update_2(data = nhanes4_data_8to14 %>%
                             biomarkers = n3_biomarkers_update)
 
 n4_hd_female$data$hd_log_dev <- residuals(lm(hd_log ~ age, data = n4_hd_female$data, na.action = na.exclude, weights = weights))
+n4_hd_female$data$hd_log_dev <- scale(n4_hd_female$data$hd_log_dev)[,1]
 n4_hd_male$data$hd_log_dev <- residuals(lm(hd_log ~ age, data = n4_hd_male$data, na.action = na.exclude, weights = weights))
+n4_hd_male$data$hd_log_dev <- scale(n4_hd_male$data$hd_log_dev)[,1]
 
 n4_hd_data <- rbind(n4_hd_female$data, n4_hd_male$data) %>% dplyr::select(sampleID, hd, hd_log, hd_log_dev)
 
